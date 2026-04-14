@@ -1125,6 +1125,56 @@
                 : "第1QR（元のデータ）を探索中...";
         }
 
+        function decodeDigitalSignaturePayloadText(text) {
+            const value = text == null ? '' : String(text).trim();
+            if (value.length !== 56) return null;
+            if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
+
+            try {
+                const binaryStr = atob(value);
+                if (binaryStr.length !== 42) return null;
+                const signBytes = new Uint8Array(42);
+                for (let i = 0; i < 42; i++) signBytes[i] = binaryStr.charCodeAt(i);
+                return {
+                    keyId: (signBytes[0] << 8) | signBytes[1],
+                    sigR: signBytes.slice(2, 22),
+                    sigS: signBytes.slice(22, 42)
+                };
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function buildDigitalSignatureResultFromCurrentPair() {
+            if (!firstQR || !secondQR) return null;
+
+            const payload = decodeDigitalSignaturePayloadText(secondQR.text);
+            if (!payload) return null;
+
+            const imageDataId = firstQR.managementExt32 || 0;
+            const hasImageDataId = firstQR.managementExt32 !== undefined && firstQR.managementExt32 !== null;
+            let verified = false;
+            let senderName = "荳肴・";
+
+            try {
+                const pubKeyCacheHex = ECDSA_PUBLIC_KEYS[payload.keyId];
+                const codewordsArray = firstQR.codewords;
+                if (pubKeyCacheHex) {
+                    senderName = ECDSA_SENDER_NAMES[payload.keyId] || `ID:${payload.keyId}`;
+                    if (codewordsArray && codewordsArray.length) {
+                        const hashInput = new Uint8Array(codewordsArray);
+                        verified = ecdsaVerify(hashInput, payload.sigR, payload.sigS, pubKeyCacheHex);
+                    }
+                }
+            } catch (err) {
+                console.error("Verification failed", err);
+                senderName = "繧ｨ繝ｩ繝ｼ";
+                verified = false;
+            }
+
+            return { verified, senderName, imageDataId, hasImageDataId };
+        }
+
         function finalizeDigitalSignaturePairScan() {
             if (!firstQR || !secondQR) return;
 
@@ -1246,6 +1296,11 @@
             const dsVerifyText = document.getElementById('dsVerifyText');
             const imgContainer = document.getElementById('dsImageContainer');
             const imgEl = document.getElementById('dsImage');
+            const inferredDigitalSignResult = (!digitalSignResult && !errorMessage) ? buildDigitalSignatureResultFromCurrentPair() : null;
+            if (!digitalSignResult && inferredDigitalSignResult) {
+                digitalSignResult = inferredDigitalSignResult;
+                scanMode = 'digital_sign';
+            }
 
             if (errorMessage) {
                 // ★ エラーメッセージ表示（読取期限切れ・読取者ID不一致）
@@ -4439,7 +4494,7 @@
                             if (!diffTxt && !diffMgmt) continue;
 
                             secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts };
-                            if (mgmtInfo && mgmtInfo.dataTypeBits === 2) {
+                            if ((mgmtInfo && mgmtInfo.dataTypeBits === 2) || decodeDigitalSignaturePayloadText(resultData)) {
                                 scanMode = 'digital_sign';
                                 finalizeDigitalSignaturePairScan();
                                 return;
