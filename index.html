@@ -968,6 +968,48 @@
             return false;
         }
 
+        async function tryDecodeDoubleEncFromCapturedFrame(passwordText, creationDateTimeSource = null) {
+            if (!passwordText || !capturedFrameForQ2 || !firstQR) return false;
+
+            let derivedMask = null;
+            const dateTimeSource = creationDateTimeSource != null
+                ? creationDateTimeSource
+                : (firstQR && firstQR.creationDateTimeExt32 != null ? firstQR.creationDateTimeExt32 : null);
+
+            statusText.innerText = "マスク生成中...";
+            if (dateTimeSource != null) {
+                const pwBytes = new TextEncoder().encode(passwordText);
+                const dtBytes = new Uint8Array(4);
+                dtBytes[0] = (dateTimeSource >>> 24) & 0xFF;
+                dtBytes[1] = (dateTimeSource >>> 16) & 0xFF;
+                dtBytes[2] = (dateTimeSource >>> 8) & 0xFF;
+                dtBytes[3] = dateTimeSource & 0xFF;
+                const combined = new Uint8Array(pwBytes.length + 4);
+                combined.set(pwBytes);
+                combined.set(dtBytes, pwBytes.length);
+                derivedMask = await deriveEncryptionMaskBytesFromInputAsync(combined, 5000);
+            } else {
+                derivedMask = await deriveEncryptionMaskBytesAsync(passwordText, 5000);
+            }
+
+            statusText.innerText = "キャプチャ画像からQR2をデコード中...";
+            const appMaskArray = Array.from(derivedMask);
+            for (const decodeOpts of [
+                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray, multi: true },
+                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray },
+                { inversionAttempts: "dontInvert", appEncMask: appMaskArray, multi: true },
+                { inversionAttempts: "dontInvert", appEncMask: appMaskArray }
+            ]) {
+                if (tryDecodeQ2FromCapturedFrame(decodeOpts)) {
+                    appMask = derivedMask;
+                    return true;
+                }
+            }
+
+            appMask = null;
+            return false;
+        }
+
         async function submitPassword() {
             const pw = document.getElementById('appPasswordInput').value;
             if (!pw) {
@@ -1069,42 +1111,11 @@
             }
 
             document.getElementById('doubleEncScreen').style.display = 'none';
-            statusText.innerText = "マスク生成中...";
-
-            if (firstQR && firstQR.creationDateTimeExt32 != null) {
-                const pwBytes = new TextEncoder().encode(pw);
-                const dt = firstQR.creationDateTimeExt32;
-                const dtBytes = new Uint8Array(4);
-                dtBytes[0] = (dt >>> 24) & 0xFF;
-                dtBytes[1] = (dt >>> 16) & 0xFF;
-                dtBytes[2] = (dt >>> 8) & 0xFF;
-                dtBytes[3] = dt & 0xFF;
-                const combined = new Uint8Array(pwBytes.length + 4);
-                combined.set(pwBytes);
-                combined.set(dtBytes, pwBytes.length);
-                appMask = await deriveEncryptionMaskBytesFromInputAsync(combined, 5000);
-            } else {
-                appMask = await deriveEncryptionMaskBytesAsync(pw, 5000);
-            }
-
-            // ★ キャプチャフレームからQR2を即座にデコード試行
-            statusText.innerText = "キャプチャ画像からQR2をデコード中...";
-            const appMaskArray = Array.from(appMask);
-            let decoded = false;
-            for (const decodeOpts of [
-                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray, sysEncDecode: true, multi: true },
-                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray, sysEncDecode: true },
-                { inversionAttempts: "dontInvert", appEncMask: appMaskArray, sysEncDecode: true, multi: true },
-                { inversionAttempts: "dontInvert", appEncMask: appMaskArray, sysEncDecode: true }
-            ]) {
-                if (tryDecodeQ2FromCapturedFrame(decodeOpts)) {
-                    decoded = true;
-                    break;
-                }
-            }
+            const decoded = await tryDecodeDoubleEncFromCapturedFrame(pw);
             if (decoded) {
                 capturedFrameForQ2 = null;
                 isScanning = false;
+                scanMode = 'double';
                 showResultScreen();
                 return;
             }
@@ -4310,10 +4321,6 @@
                                 continue;
                             }
 
-                            if (scanMode === 'auto') {
-                                scanMode = (mgmtInfo && mgmtInfo.sysEncFlag && mgmtInfo.appEncFlag) ? 'double' : 'normal';
-                            }
-
                             if (mgmtInfo && mgmtInfo.sameDataFlag) {
                                 secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts };
                                 isScanning = false;
@@ -4322,9 +4329,9 @@
                                 return;
                             }
 
-                            if (scanMode === 'normal') {
-                                if (mgmtInfo && mgmtInfo.sysEncFlag) {
-                                    // ★ フレームキャプチャ（QR2オフラインデコード用）
+                            if (scanMode === 'auto') {
+                                const mayBeDoubleEncPassword = typeof resultData === 'string' && /^[A-Za-z0-9]+$/.test(resultData);
+                                if (mgmtInfo && mgmtInfo.sysEncFlag && mayBeDoubleEncPassword) {
                                     try {
                                         const vw = video.videoWidth, vh = video.videoHeight;
                                         const capCv = document.createElement('canvas');
@@ -4334,6 +4341,35 @@
                                         capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
                                         capturedFrameW = vw; capturedFrameH = vh;
                                     } catch(e) { capturedFrameForQ2 = null; }
+
+                                    const autoDoubleDecoded = await tryDecodeDoubleEncFromCapturedFrame(resultData, item.creationDateTimeExt32);
+                                    if (autoDoubleDecoded) {
+                                        scanMode = 'double';
+                                        capturedFrameForQ2 = null;
+                                        isScanning = false;
+                                        isProcessing = false;
+                                        showResultScreen();
+                                        return;
+                                    }
+                                    appMask = null;
+                                }
+                                scanMode = 'normal';
+                            }
+
+                            if (scanMode === 'normal') {
+                                if (mgmtInfo && mgmtInfo.sysEncFlag) {
+                                    // ★ フレームキャプチャ（QR2オフラインデコード用）
+                                    if (!capturedFrameForQ2) {
+                                        try {
+                                            const vw = video.videoWidth, vh = video.videoHeight;
+                                            const capCv = document.createElement('canvas');
+                                            capCv.width = vw; capCv.height = vh;
+                                            const capCtx = capCv.getContext('2d');
+                                            capCtx.drawImage(video, 0, 0, vw, vh);
+                                            capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
+                                            capturedFrameW = vw; capturedFrameH = vh;
+                                        } catch(e) { capturedFrameForQ2 = null; }
+                                    }
                                     isProcessing = false;
                                     showSysEncScreen();
                                     return;
