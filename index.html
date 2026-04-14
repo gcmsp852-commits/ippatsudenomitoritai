@@ -151,9 +151,9 @@
                 <label>パスワードA</label>
                 <div class="text" id="doubleEncQr1Text">-</div>
             </div>
-            <p>パスワードAを入力</p>
+            <p>パスワードAを入力して復号</p>
             <input type="password" id="doubleEncPasswordInput" placeholder="Password" />
-            <button class="btn double-enc" onclick="resumeAfterDoubleEnc()">スキャン再開</button>
+            <button class="btn double-enc" onclick="resumeAfterDoubleEnc()">復号実行</button>
             <button class="btn secondary" onclick="cancelDoubleEnc()">キャンセル</button>
         </div>
     </div>
@@ -1089,11 +1089,19 @@
 
             // ★ キャプチャフレームからQR2を即座にデコード試行
             statusText.innerText = "キャプチャ画像からQR2をデコード中...";
-            const decoded = tryDecodeQ2FromCapturedFrame({
-                inversionAttempts: "attemptBoth",
-                appEncMask: Array.from(appMask),
-                multi: true
-            });
+            const appMaskArray = Array.from(appMask);
+            let decoded = false;
+            for (const decodeOpts of [
+                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray, sysEncDecode: true, multi: true },
+                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray, sysEncDecode: true },
+                { inversionAttempts: "dontInvert", appEncMask: appMaskArray, sysEncDecode: true, multi: true },
+                { inversionAttempts: "dontInvert", appEncMask: appMaskArray, sysEncDecode: true }
+            ]) {
+                if (tryDecodeQ2FromCapturedFrame(decodeOpts)) {
+                    decoded = true;
+                    break;
+                }
+            }
             if (decoded) {
                 capturedFrameForQ2 = null;
                 isScanning = false;
@@ -1101,13 +1109,10 @@
                 return;
             }
 
-            // フォールバック: 従来のスキャンループ
-            scanStage = 3;
-            if (firstQR) firstQR.points = null;
-            statusText.innerText = "第2QR（ユーザ暗号化）を探索中...";
-            isScanning = true;
-            lastDetectTime = Date.now();
-            requestAnimationFrame(scanLoop);
+            capturedFrameForQ2 = null;
+            isScanning = false;
+            isProcessing = false;
+            showResultScreen(null, "1回の読み取り画像から第2QRを復号できませんでした");
         }
 
         function enterDigitalSignPairScan(waitingForQrNo) {
