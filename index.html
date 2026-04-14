@@ -4329,31 +4329,40 @@
                                 return;
                             }
 
+                            const mgmtLooksDouble = !!(mgmtInfo && mgmtInfo.sysEncFlag && mgmtInfo.appEncFlag);
                             if (scanMode === 'auto') {
-                                const mayBeDoubleEncPassword = typeof resultData === 'string' && /^[A-Za-z0-9]+$/.test(resultData);
-                                if (mgmtInfo && mgmtInfo.sysEncFlag && mayBeDoubleEncPassword) {
-                                    try {
-                                        const vw = video.videoWidth, vh = video.videoHeight;
-                                        const capCv = document.createElement('canvas');
-                                        capCv.width = vw; capCv.height = vh;
-                                        const capCtx = capCv.getContext('2d');
-                                        capCtx.drawImage(video, 0, 0, vw, vh);
-                                        capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                        capturedFrameW = vw; capturedFrameH = vh;
-                                    } catch(e) { capturedFrameForQ2 = null; }
+                                if (mgmtLooksDouble) {
+                                    scanMode = 'double';
+                                } else {
+                                    const mayBeDoubleEncPassword = typeof resultData === 'string' && /^[A-Za-z0-9]+$/.test(resultData);
+                                    if (mgmtInfo && mgmtInfo.sysEncFlag && mayBeDoubleEncPassword) {
+                                        try {
+                                            const vw = video.videoWidth, vh = video.videoHeight;
+                                            const capCv = document.createElement('canvas');
+                                            capCv.width = vw; capCv.height = vh;
+                                            const capCtx = capCv.getContext('2d');
+                                            capCtx.drawImage(video, 0, 0, vw, vh);
+                                            capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
+                                            capturedFrameW = vw; capturedFrameH = vh;
+                                        } catch(e) { capturedFrameForQ2 = null; }
 
-                                    const autoDoubleDecoded = await tryDecodeDoubleEncFromCapturedFrame(resultData, item.creationDateTimeExt32);
-                                    if (autoDoubleDecoded) {
-                                        scanMode = 'double';
-                                        capturedFrameForQ2 = null;
-                                        isScanning = false;
-                                        isProcessing = false;
-                                        showResultScreen();
-                                        return;
+                                        const autoDoubleDecoded = await tryDecodeDoubleEncFromCapturedFrame(resultData, item.creationDateTimeExt32);
+                                        if (autoDoubleDecoded) {
+                                            scanMode = 'double';
+                                            capturedFrameForQ2 = null;
+                                            isScanning = false;
+                                            isProcessing = false;
+                                            showResultScreen();
+                                            return;
+                                        }
+                                        appMask = null;
                                     }
-                                    appMask = null;
+                                    scanMode = 'normal';
                                 }
-                                scanMode = 'normal';
+                            }
+
+                            if (scanMode === 'normal' && mgmtLooksDouble) {
+                                scanMode = 'double';
                             }
 
                             if (scanMode === 'normal') {
@@ -4393,15 +4402,27 @@
                                 }
                             } else {
                                 // 二重暗号化モード ★ フレームキャプチャ
-                                try {
-                                    const vw = video.videoWidth, vh = video.videoHeight;
-                                    const capCv = document.createElement('canvas');
-                                    capCv.width = vw; capCv.height = vh;
-                                    const capCtx = capCv.getContext('2d');
-                                    capCtx.drawImage(video, 0, 0, vw, vh);
-                                    capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                    capturedFrameW = vw; capturedFrameH = vh;
-                                } catch(e) { capturedFrameForQ2 = null; }
+                                if (!capturedFrameForQ2) {
+                                    try {
+                                        const vw = video.videoWidth, vh = video.videoHeight;
+                                        const capCv = document.createElement('canvas');
+                                        capCv.width = vw; capCv.height = vh;
+                                        const capCtx = capCv.getContext('2d');
+                                        capCtx.drawImage(video, 0, 0, vw, vh);
+                                        capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
+                                        capturedFrameW = vw; capturedFrameH = vh;
+                                    } catch(e) { capturedFrameForQ2 = null; }
+                                }
+                                const autoDoubleDecoded = await tryDecodeDoubleEncFromCapturedFrame(firstQR ? firstQR.text : resultData, item.creationDateTimeExt32);
+                                if (autoDoubleDecoded) {
+                                    capturedFrameForQ2 = null;
+                                    isScanning = false;
+                                    isProcessing = false;
+                                    scanMode = 'double';
+                                    showResultScreen();
+                                    return;
+                                }
+                                appMask = null;
                                 isProcessing = false;
                                 showDoubleEncScreen();
                                 return;
