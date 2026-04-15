@@ -3374,6 +3374,20 @@
                 isProcessing = true;
                 lastDetectTime = now;
 
+                // ★ 1ティックの開始時に現在のカメラフレーム全体のImageDataを取得しておく（各種暗号化などのオフラインデコード用）
+                let currentTickFrame = null;
+                const vw = video.videoWidth;
+                const vh = video.videoHeight;
+                if (vw > 0 && vh > 0) {
+                    try {
+                        const capCv = document.createElement('canvas');
+                        capCv.width = vw; capCv.height = vh;
+                        const capCtx = capCv.getContext('2d');
+                        capCtx.drawImage(video, 0, 0, vw, vh);
+                        currentTickFrame = capCtx.getImageData(0, 0, vw, vh);
+                    } catch(e) {}
+                }
+
                 try {
                     // === 新カラー符号化モード ===
                     if (detectedMode === 'new_color_enc') {
@@ -3724,7 +3738,7 @@
                         zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
                         const fullData = zxingCtx.getImageData(0, 0, zxingCanvas.width, zxingCanvas.height);
 
-                        const opts = { inversionAttempts: "attemptBoth" };
+                        const opts = { inversionAttempts: "attemptBoth", multi: true };
 
                         if (scanStage === 3) {
                             if (appMask) {
@@ -3732,8 +3746,6 @@
                             } else if (needSysEncForStage3 || needSysEncForDigitalSign) {
                                 // 通常モード/電子署名モード: 第2QRはシステム暗号化されている
                                 opts.sysEncDecode = true;
-                            } else {
-                                opts.multi = true;
                             }
                         }
 
@@ -3944,43 +3956,31 @@
                                 return; // 次のフレームでカラー部分を読み取る
                             } else if (detectedMode === 'double_enc') {
                                 // 二重暗号化モード: フレームキャプチャ → DoubleEnc画面
-                                try {
-                                    const vw = video.videoWidth, vh = video.videoHeight;
-                                    const capCv = document.createElement('canvas');
-                                    capCv.width = vw; capCv.height = vh;
-                                    const capCtx = capCv.getContext('2d');
-                                    capCtx.drawImage(video, 0, 0, vw, vh);
-                                    capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                    capturedFrameW = vw; capturedFrameH = vh;
-                                } catch(e) { capturedFrameForQ2 = null; }
+                                if (currentTickFrame) {
+                                    capturedFrameForQ2 = currentTickFrame;
+                                    capturedFrameW = video.videoWidth;
+                                    capturedFrameH = video.videoHeight;
+                                }
                                 isProcessing = false;
                                 showDoubleEncScreen();
                                 return;
                             } else if (detectedMode === 'sys_enc') {
                                 // システム暗号化モード: フレームキャプチャ → SysEnc画面
-                                try {
-                                    const vw = video.videoWidth, vh = video.videoHeight;
-                                    const capCv = document.createElement('canvas');
-                                    capCv.width = vw; capCv.height = vh;
-                                    const capCtx = capCv.getContext('2d');
-                                    capCtx.drawImage(video, 0, 0, vw, vh);
-                                    capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                    capturedFrameW = vw; capturedFrameH = vh;
-                                } catch(e) { capturedFrameForQ2 = null; }
+                                if (currentTickFrame) {
+                                    capturedFrameForQ2 = currentTickFrame;
+                                    capturedFrameW = video.videoWidth;
+                                    capturedFrameH = video.videoHeight;
+                                }
                                 isProcessing = false;
                                 showSysEncScreen();
                                 return;
                             } else if (detectedMode === 'app_enc') {
                                 // ユーザ暗号化モード: フレームキャプチャ → パスワード画面
-                                try {
-                                    const vw = video.videoWidth, vh = video.videoHeight;
-                                    const capCv = document.createElement('canvas');
-                                    capCv.width = vw; capCv.height = vh;
-                                    const capCtx = capCv.getContext('2d');
-                                    capCtx.drawImage(video, 0, 0, vw, vh);
-                                    capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                    capturedFrameW = vw; capturedFrameH = vh;
-                                } catch(e) { capturedFrameForQ2 = null; }
+                                if (currentTickFrame) {
+                                    capturedFrameForQ2 = currentTickFrame;
+                                    capturedFrameW = video.videoWidth;
+                                    capturedFrameH = video.videoHeight;
+                                }
                                 isProcessing = false;
                                 showPasswordScreen();
                                 return;
