@@ -75,22 +75,17 @@
         <video id="camera" playsinline autoplay muted></video>
         <canvas id="overlayCanvas"></canvas>
         <div id="cameraControls">
-            <button class="btn secondary" onclick="goBack()">🔄 モード切替</button>
+            <button class="btn secondary" onclick="goBack()">🔄 スキャンに戻る</button>
             <button class="btn" onclick="restartScan()">📷 もう一度スキャン</button>
         </div>
     </div>
     <canvas id="zxingCanvas"></canvas>
 
     <div class="result-panel">
-        <div class="status" id="statusText">モードを選択してください</div>
+        <div class="status" id="statusText">スキャンを開始してください</div>
         <div id="btnContainer">
             <div class="mode-btns">
-                <button class="btn" id="autoModeBtn">自動読取開始</button>
-                <button class="btn" id="normalModeBtn">通常モード</button>
-                <button class="btn sys-enc" id="digitalSignModeBtn">電子署名モード</button>
-                <button class="btn double-enc" id="doubleEncModeBtn">二重暗号化モード</button>
-                <button class="btn" id="colorEncModeBtn" style="background-color:#00897B; display:none;">カラー符号化モード</button>
-                <button class="btn" id="newColorEncModeBtn" style="background-color:#6A1B9A;">新カラー符号化モード</button>
+                <button class="btn" id="startScanBtn" style="font-size:1.2rem;">📷 スキャン開始</button>
                 <button class="btn secondary" id="logoutBtn" style="margin-top:10px; font-size:0.9rem;">端末情報を変更</button>
             </div>
         </div>
@@ -115,14 +110,14 @@
     <!-- パスワード入力画面（ユーザ暗号化用） -->
     <div class="overlay-screen" id="passwordScreen">
         <div class="overlay-box">
-            <h2>ユーザ暗号化されたQRコードです</h2>
+            <h2>QRコードは暗号化されています</h2>
             <div class="qr-data-card">
                 <label>第1QRのデータ</label>
                 <div class="text" id="qr1PreviewText">-</div>
             </div>
-            <p>ユーザ暗号化パスワードを入力して復号</p>
+            <p>パスワードを入力してスキャン再開</p>
             <input type="password" id="appPasswordInput" placeholder="Password" />
-            <button class="btn" onclick="submitPassword()">復号実行</button>
+            <button class="btn" onclick="submitPassword()">スキャン再開</button>
             <button class="btn secondary" onclick="cancelPassword()">キャンセル</button>
         </div>
     </div>
@@ -151,9 +146,9 @@
                 <label>パスワードA</label>
                 <div class="text" id="doubleEncQr1Text">-</div>
             </div>
-            <p>パスワードAを入力して復号</p>
+            <p>パスワードAを入力</p>
             <input type="password" id="doubleEncPasswordInput" placeholder="Password" />
-            <button class="btn double-enc" onclick="resumeAfterDoubleEnc()">復号実行</button>
+            <button class="btn double-enc" onclick="resumeAfterDoubleEnc()">スキャン再開</button>
             <button class="btn secondary" onclick="cancelDoubleEnc()">キャンセル</button>
         </div>
     </div>
@@ -546,12 +541,12 @@
         const TRI_LIGHT_PRIORITY = ['green', 'cyan', 'yellow'];
         const QUAD_COLOR_NAMES = ['black', 'blue', 'red', 'purple', 'yellow', 'cyan', 'green', 'white'];
 
-        // モード: 'normal', 'double', 'digital_sign', 'color_enc', 'new_color_enc'
-        let scanMode = 'auto';
+        // ★ 自動識別モード: 管理部を読み取って自動判定
+        // 可能な値: 'normal', 'same_data', 'sys_enc', 'app_enc', 'double_enc', 'digital_sign', 'new_color_enc'
+        let detectedMode = 'normal';
         let newColorScanStage = 0; // 0=Q1探索中, 1=Q1検出済み(色QR探索中)
         let newColorQ1Data = null; // 第1QRの読取結果
         let newColorScanResult = null;
-        let autoSysEncProbeCount = 0;
 
         let barcodeDetector = null;
         if ('BarcodeDetector' in window) {
@@ -814,15 +809,7 @@
                 isScanning = true;
                 startWatchingPosition();
 
-                if (scanMode === 'auto') {
-                    statusText.innerText = "QRツインを自動判定で探索中...";
-                } else if (scanMode === 'normal') {
-                    statusText.innerText = "第1QRを探索中... (Hybrid)";
-                } else if (scanMode === 'new_color_enc') {
-                    statusText.innerText = "カラーQRツインの第1QRを探索中...";
-                } else {
-                    statusText.innerText = "第1QR（システム暗号化）を探索中...";
-                }
+                statusText.innerText = "QRツインを探索中...";
                 requestAnimationFrame(scanLoop);
                 
             } catch (err) {
@@ -830,68 +817,60 @@
             }
         }
 
+        // ★ QRツイン種類の自動判定（管理部32ビットから）
+        function classifyQrTwinType(mgmtInfo) {
+            if (!mgmtInfo) return 'normal';
+            
+            // 3/4領域化カラーQRツイン
+            if (mgmtInfo.colorCountBits >= 2) return 'new_color_enc';
+            
+            // 同一データ
+            if (mgmtInfo.sameDataFlag) return 'same_data';
+            
+            // 二重暗号化 (sysEnc=1, appEnc=1)
+            if (mgmtInfo.sysEncFlag && mgmtInfo.appEncFlag) return 'double_enc';
+            
+            // sysEnc=1, appEnc=0: 電子署名 or システム暗号化
+            if (mgmtInfo.sysEncFlag && !mgmtInfo.appEncFlag) {
+                // dataTypeBits === 2 (010) = 署名 → 電子署名QRツイン
+                if (mgmtInfo.dataTypeBits === 2) return 'digital_sign';
+                return 'sys_enc';
+            }
+            
+            // ユーザ暗号化のみ (sysEnc=0, appEnc=1)
+            if (mgmtInfo.appEncFlag) return 'app_enc';
+            
+            // ノーマル
+            return 'normal';
+        }
+
+        // ★ 検出されたモードに対応するヘッダーラベル
+        function getModeLabel(mode) {
+            const labels = {
+                'normal': 'ノーマルQRツイン',
+                'same_data': '同一データQRツイン',
+                'sys_enc': 'システム暗号化QRツイン',
+                'app_enc': 'ユーザ暗号化QRツイン',
+                'double_enc': '二重暗号化QRツイン',
+                'digital_sign': '電子署名QRツイン',
+                'new_color_enc': 'カラーQRツイン'
+            };
+            return labels[mode] || 'QRツイン';
+        }
+
         // ログアウトボタン
         document.getElementById('logoutBtn').addEventListener('click', () => {
             doLogout();
         });
 
-        // モード選択ボタン
-        function hideLegacyModeButtons() {
-            ['normalModeBtn', 'doubleEncModeBtn', 'digitalSignModeBtn', 'newColorEncModeBtn'].forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.style.display = 'none';
-            });
-        }
-
-        function startAutoScan() {
-            scanMode = 'auto';
+        // ★ 統一スキャン開始ボタン
+        document.getElementById('startScanBtn').addEventListener('click', () => {
+            detectedMode = 'normal'; // 初期値、第1QR読取後に自動更新される
             appMask = null;
-            sysEncStage3 = false;
-            digitalSignStage3 = false;
-            autoSysEncProbeCount = 0;
             resetNewColorScanState();
             document.getElementById('headerText').innerText = 'QR Twin Reader';
             startCamera();
-        }
-
-        hideLegacyModeButtons();
-        document.getElementById('autoModeBtn').addEventListener('click', () => {
-            startAutoScan();
         });
-
-        document.getElementById('normalModeBtn').addEventListener('click', () => {
-            scanMode = 'normal';
-            document.getElementById('headerText').innerText = 'QR Twin Reader (通常モード)';
-            startCamera();
-        });
-
-        document.getElementById('doubleEncModeBtn').addEventListener('click', () => {
-            scanMode = 'double';
-            document.getElementById('headerText').innerText = 'QR Twin Reader (二重暗号化モード)';
-            startCamera();
-        });
-
-        document.getElementById('digitalSignModeBtn').addEventListener('click', () => {
-            scanMode = 'digital_sign';
-            document.getElementById('headerText').innerText = 'QR Twin Reader (電子署名対応)';
-            startScanByDigitalSign();
-        });
-
-        // ★ 新カラー符号化モード
-        document.getElementById('newColorEncModeBtn').addEventListener('click', () => {
-            scanMode = 'new_color_enc';
-            appMask = null;
-            resetNewColorScanState();
-            document.getElementById('headerText').innerText = 'QR Twin Reader (新カラー符号化)';
-            startCamera();
-        });
-
-        function startScanByDigitalSign() {
-            scanStage = 1;
-            digitalSignStage3 = false;
-            statusText.innerText = "電子署名モード: 第1QRを探索中...";
-            startCamera();
-        }
 
         // --- UI アクション ---
         function showPasswordScreen(previewText = null, waitingText = null) {
@@ -947,7 +926,8 @@
         // 成功時: secondQRをセットしてtrue返却、失敗時: false返却（従来のスキャンにフォールバック）
         function tryDecodeQ2FromCapturedFrame(opts) {
             if (!capturedFrameForQ2 || !firstQR) return false;
-            const assignSecondQrFromItems = (resList, offsetX = 0, offsetY = 0) => {
+            try {
+                const resList = jsQR(capturedFrameForQ2.data, capturedFrameW, capturedFrameH, opts);
                 const items = Array.isArray(resList) ? resList : (resList ? [resList] : []);
                 for (const item of items) {
                     if (!item || !item.data) continue;
@@ -958,88 +938,12 @@
                     const diffTxt = item.data !== firstQR.text;
                     const diffMgmt = firstQR.managementCode !== undefined && mgmt32 !== undefined && firstQR.managementCode !== mgmt32;
                     if (!diffTxt && !diffMgmt) continue; // QR1と同一なら無視
-                    let adjustedLocation = item.location || null;
-                    if (adjustedLocation && (offsetX !== 0 || offsetY !== 0)) {
-                        adjustedLocation = {
-                            topLeftCorner: { x: adjustedLocation.topLeftCorner.x + offsetX, y: adjustedLocation.topLeftCorner.y + offsetY },
-                            topRightCorner: { x: adjustedLocation.topRightCorner.x + offsetX, y: adjustedLocation.topRightCorner.y + offsetY },
-                            bottomRightCorner: { x: adjustedLocation.bottomRightCorner.x + offsetX, y: adjustedLocation.bottomRightCorner.y + offsetY },
-                            bottomLeftCorner: { x: adjustedLocation.bottomLeftCorner.x + offsetX, y: adjustedLocation.bottomLeftCorner.y + offsetY }
-                        };
-                    }
-                    secondQR = { text: item.data, managementCode: mgmt32, points: adjustedLocation };
+                    secondQR = { text: item.data, managementCode: mgmt32, points: item.location || null };
                     return true;
-                }
-                return false;
-            };
-            try {
-                const resList = jsQR(capturedFrameForQ2.data, capturedFrameW, capturedFrameH, opts);
-                if (assignSecondQrFromItems(resList)) {
-                    return true;
-                }
-                if (lastTwinBBox && capturedFrameW > 0 && capturedFrameH > 0) {
-                    const bbox = lastTwinBBox;
-                    const padding = Math.max(80, Math.floor(Math.max(bbox.width || 0, bbox.height || 0) * 0.8));
-                    const sx = Math.max(0, Math.floor(bbox.x) - padding);
-                    const sy = Math.max(0, Math.floor(bbox.y) - padding);
-                    const sw = Math.min(capturedFrameW - sx, Math.ceil(bbox.width) + padding * 2);
-                    const sh = Math.min(capturedFrameH - sy, Math.ceil(bbox.height) + padding * 2);
-                    if (sw > 0 && sh > 0) {
-                        zxingCanvas.width = capturedFrameW;
-                        zxingCanvas.height = capturedFrameH;
-                        zxingCtx.putImageData(capturedFrameForQ2, 0, 0);
-                        const cropped = zxingCtx.getImageData(sx, sy, sw, sh);
-                        const cropResList = jsQR(cropped.data, sw, sh, opts);
-                        if (assignSecondQrFromItems(cropResList, sx, sy)) {
-                            return true;
-                        }
-                    }
                 }
             } catch(e) {
                 console.warn("キャプチャフレームからのQR2デコード失敗:", e);
             }
-            return false;
-        }
-
-        async function tryDecodeDoubleEncFromCapturedFrame(passwordText, creationDateTimeSource = null) {
-            if (!passwordText || !capturedFrameForQ2 || !firstQR) return false;
-
-            let derivedMask = null;
-            const dateTimeSource = creationDateTimeSource != null
-                ? creationDateTimeSource
-                : (firstQR && firstQR.creationDateTimeExt32 != null ? firstQR.creationDateTimeExt32 : null);
-
-            statusText.innerText = "マスク生成中...";
-            if (dateTimeSource != null) {
-                const pwBytes = new TextEncoder().encode(passwordText);
-                const dtBytes = new Uint8Array(4);
-                dtBytes[0] = (dateTimeSource >>> 24) & 0xFF;
-                dtBytes[1] = (dateTimeSource >>> 16) & 0xFF;
-                dtBytes[2] = (dateTimeSource >>> 8) & 0xFF;
-                dtBytes[3] = dateTimeSource & 0xFF;
-                const combined = new Uint8Array(pwBytes.length + 4);
-                combined.set(pwBytes);
-                combined.set(dtBytes, pwBytes.length);
-                derivedMask = await deriveEncryptionMaskBytesFromInputAsync(combined, 5000);
-            } else {
-                derivedMask = await deriveEncryptionMaskBytesAsync(passwordText, 5000);
-            }
-
-            statusText.innerText = "キャプチャ画像からQR2をデコード中...";
-            const appMaskArray = Array.from(derivedMask);
-            for (const decodeOpts of [
-                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray, multi: true },
-                { inversionAttempts: "attemptBoth", appEncMask: appMaskArray },
-                { inversionAttempts: "dontInvert", appEncMask: appMaskArray, multi: true },
-                { inversionAttempts: "dontInvert", appEncMask: appMaskArray }
-            ]) {
-                if (tryDecodeQ2FromCapturedFrame(decodeOpts)) {
-                    appMask = derivedMask;
-                    return true;
-                }
-            }
-
-            appMask = null;
             return false;
         }
 
@@ -1053,7 +957,7 @@
             document.getElementById('passwordScreen').style.display = 'none';
             statusText.innerText = "マスク生成中...";
 
-            const creationDateTimeSource = scanMode === 'new_color_enc'
+            const creationDateTimeSource = detectedMode === 'new_color_enc'
                 ? (newColorQ1Data && newColorQ1Data.creationDateTimeExt32 != null ? newColorQ1Data.creationDateTimeExt32 : null)
                 : (firstQR && firstQR.creationDateTimeExt32 != null ? firstQR.creationDateTimeExt32 : null);
 
@@ -1074,7 +978,7 @@
                 appMask = await deriveEncryptionMaskBytesAsync(pw, 5000);
             }
 
-            if (scanMode === 'new_color_enc') {
+            if (detectedMode === 'new_color_enc') {
                 newColorScanStage = 1;
                 if (!newColorScanResult) {
                     newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
@@ -1114,18 +1018,11 @@
 
             // ★ キャプチャフレームからQR2を即座にデコード試行
             statusText.innerText = "キャプチャ画像からQR2をデコード中...";
-            let decoded = false;
-            for (const decodeOpts of [
-                { inversionAttempts: "attemptBoth", sysEncDecode: true, multi: true },
-                { inversionAttempts: "attemptBoth", sysEncDecode: true },
-                { inversionAttempts: "dontInvert", sysEncDecode: true, multi: true },
-                { inversionAttempts: "dontInvert", sysEncDecode: true }
-            ]) {
-                if (tryDecodeQ2FromCapturedFrame(decodeOpts)) {
-                    decoded = true;
-                    break;
-                }
-            }
+            const decoded = tryDecodeQ2FromCapturedFrame({
+                inversionAttempts: "attemptBoth",
+                sysEncDecode: true,
+                multi: true
+            });
             if (decoded) {
                 capturedFrameForQ2 = null;
                 isScanning = false;
@@ -1133,10 +1030,14 @@
                 return;
             }
 
-            capturedFrameForQ2 = null;
-            isScanning = false;
-            isProcessing = false;
-            showResultScreen(null, "1回の読み取り画像から第2QRを復号できませんでした");
+            // フォールバック: 従来のスキャンループ
+            scanStage = 3;
+            sysEncStage3 = true;
+            if (firstQR) firstQR.points = null;
+            statusText.innerText = "第2QR（システム暗号化）を探索中...";
+            isScanning = true;
+            lastDetectTime = Date.now();
+            requestAnimationFrame(scanLoop);
         }
 
         async function resumeAfterDoubleEnc() {
@@ -1147,19 +1048,45 @@
             }
 
             document.getElementById('doubleEncScreen').style.display = 'none';
-            const decoded = await tryDecodeDoubleEncFromCapturedFrame(pw);
+            statusText.innerText = "マスク生成中...";
+
+            if (firstQR && firstQR.creationDateTimeExt32 != null) {
+                const pwBytes = new TextEncoder().encode(pw);
+                const dt = firstQR.creationDateTimeExt32;
+                const dtBytes = new Uint8Array(4);
+                dtBytes[0] = (dt >>> 24) & 0xFF;
+                dtBytes[1] = (dt >>> 16) & 0xFF;
+                dtBytes[2] = (dt >>> 8) & 0xFF;
+                dtBytes[3] = dt & 0xFF;
+                const combined = new Uint8Array(pwBytes.length + 4);
+                combined.set(pwBytes);
+                combined.set(dtBytes, pwBytes.length);
+                appMask = await deriveEncryptionMaskBytesFromInputAsync(combined, 5000);
+            } else {
+                appMask = await deriveEncryptionMaskBytesAsync(pw, 5000);
+            }
+
+            // ★ キャプチャフレームからQR2を即座にデコード試行
+            statusText.innerText = "キャプチャ画像からQR2をデコード中...";
+            const decoded = tryDecodeQ2FromCapturedFrame({
+                inversionAttempts: "attemptBoth",
+                appEncMask: Array.from(appMask),
+                multi: true
+            });
             if (decoded) {
                 capturedFrameForQ2 = null;
                 isScanning = false;
-                scanMode = 'double';
                 showResultScreen();
                 return;
             }
 
-            capturedFrameForQ2 = null;
-            isScanning = false;
-            isProcessing = false;
-            showResultScreen(null, "1回の読み取り画像から第2QRを復号できませんでした");
+            // フォールバック: 従来のスキャンループ
+            scanStage = 3;
+            if (firstQR) firstQR.points = null;
+            statusText.innerText = "第2QR（ユーザ暗号化）を探索中...";
+            isScanning = true;
+            lastDetectTime = Date.now();
+            requestAnimationFrame(scanLoop);
         }
 
         function enterDigitalSignPairScan(waitingForQrNo) {
@@ -1175,102 +1102,6 @@
             statusText.innerText = waitingForQrNo === 1
                 ? "第2QR（電子署名データ）を探索中..."
                 : "第1QR（元のデータ）を探索中...";
-        }
-
-        function decodeDigitalSignaturePayloadText(text) {
-            const value = text == null ? '' : String(text).trim();
-            if (value.length !== 56) return null;
-            if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
-
-            try {
-                const binaryStr = atob(value);
-                if (binaryStr.length !== 42) return null;
-                const signBytes = new Uint8Array(42);
-                for (let i = 0; i < 42; i++) signBytes[i] = binaryStr.charCodeAt(i);
-                return {
-                    keyId: (signBytes[0] << 8) | signBytes[1],
-                    sigR: signBytes.slice(2, 22),
-                    sigS: signBytes.slice(22, 42)
-                };
-            } catch (e) {
-                return null;
-            }
-        }
-
-        function buildDigitalSignatureResultFromCurrentPair() {
-            if (!firstQR || !secondQR) return null;
-
-            const payload = decodeDigitalSignaturePayloadText(secondQR.text);
-            if (!payload) return null;
-
-            const imageDataId = firstQR.managementExt32 || 0;
-            const hasImageDataId = firstQR.managementExt32 !== undefined && firstQR.managementExt32 !== null;
-            let verified = false;
-            let senderName = "荳肴・";
-
-            try {
-                const pubKeyCacheHex = ECDSA_PUBLIC_KEYS[payload.keyId];
-                const codewordsArray = firstQR.codewords;
-                if (pubKeyCacheHex) {
-                    senderName = ECDSA_SENDER_NAMES[payload.keyId] || `ID:${payload.keyId}`;
-                    if (codewordsArray && codewordsArray.length) {
-                        const hashInput = new Uint8Array(codewordsArray);
-                        verified = ecdsaVerify(hashInput, payload.sigR, payload.sigS, pubKeyCacheHex);
-                    }
-                }
-            } catch (err) {
-                console.error("Verification failed", err);
-                senderName = "繧ｨ繝ｩ繝ｼ";
-                verified = false;
-            }
-
-            return { verified, senderName, imageDataId, hasImageDataId };
-        }
-
-        function finalizeDigitalSignaturePairScan() {
-            if (!firstQR || !secondQR) return;
-
-            isScanning = false;
-            isProcessing = false;
-            digitalSignStage3 = false;
-            sysEncStage3 = false;
-            autoSysEncProbeCount = 0;
-            statusText.innerText = "電子署名を検証中...";
-
-            let signBytes;
-            try {
-                const binaryStr = atob(secondQR.text);
-                if (binaryStr.length !== 42) throw new Error("Invalid signature length");
-                signBytes = new Uint8Array(42);
-                for (let i = 0; i < 42; i++) signBytes[i] = binaryStr.charCodeAt(i);
-            } catch (e) {
-                showResultScreen({ verified: false, senderName: "不明", imageDataId: 0, hasImageDataId: false });
-                return;
-            }
-
-            const keyId = (signBytes[0] << 8) | signBytes[1];
-            const sigR = signBytes.slice(2, 22);
-            const sigS = signBytes.slice(22, 42);
-            const imageDataId = firstQR.managementExt32 || 0;
-            const hasImageDataId = firstQR.managementExt32 !== undefined && firstQR.managementExt32 !== null;
-
-            try {
-                const pubKeyCacheHex = ECDSA_PUBLIC_KEYS[keyId];
-                let verified = false;
-                let senderName = "不明";
-                const codewordsArray = firstQR.codewords;
-                const hashInput = new Uint8Array(codewordsArray);
-
-                if (pubKeyCacheHex) {
-                    senderName = ECDSA_SENDER_NAMES[keyId] || `ID:${keyId}`;
-                    verified = ecdsaVerify(hashInput, sigR, sigS, pubKeyCacheHex);
-                }
-
-                showResultScreen({ verified, senderName, imageDataId, hasImageDataId });
-            } catch (err) {
-                console.error("Verification failed", err);
-                showResultScreen({ verified: false, senderName: "エラー", imageDataId: 0, hasImageDataId: false });
-            }
         }
 
         function isHttpUrlText(text) {
@@ -1348,11 +1179,6 @@
             const dsVerifyText = document.getElementById('dsVerifyText');
             const imgContainer = document.getElementById('dsImageContainer');
             const imgEl = document.getElementById('dsImage');
-            const inferredDigitalSignResult = (!digitalSignResult && !errorMessage) ? buildDigitalSignatureResultFromCurrentPair() : null;
-            if (!digitalSignResult && inferredDigitalSignResult) {
-                digitalSignResult = inferredDigitalSignResult;
-                scanMode = 'digital_sign';
-            }
 
             if (errorMessage) {
                 // ★ エラーメッセージ表示（読取期限切れ・読取者ID不一致）
@@ -1409,7 +1235,7 @@
                 const label1El = document.getElementById('normalResultLabel1');
                 const label2El = document.getElementById('normalResultLabel2');
 
-                if (scanMode === 'double') {
+                if (detectedMode === 'double_enc') {
                     // 二重暗号化モード
                     resultTitle.innerText = 'ファイルのパスワードFは以下です';
                     if (label1El) label1El.innerText = 'パスワードA';
@@ -1446,16 +1272,15 @@
             capturedFrameForQ2 = null;
             capturedFrameW = 0;
             capturedFrameH = 0;
-            autoSysEncProbeCount = 0;
-            scanMode = 'auto';
             resetNewColorScanState();
             
-            // モード選択画面に戻す
+            // スキャン選択画面に戻す
             scanStage = 0;
             isScanning = false;
+            detectedMode = 'normal';
             document.getElementById('cameraControls').style.display = 'none';
             document.getElementById('btnContainer').style.display = '';
-            statusText.innerText = "モードを選択してください";
+            statusText.innerText = "スキャンを開始してください";
             document.getElementById('headerText').innerText = 'QR Twin Reader';
         }
 
@@ -1477,8 +1302,6 @@
             capturedFrameForQ2 = null;
             capturedFrameW = 0;
             capturedFrameH = 0;
-            autoSysEncProbeCount = 0;
-            scanMode = 'auto';
             resetNewColorScanState();
             // ★ 防御的リセット：前回スキャン中の状態が残る場合に備える
             isProcessing = false;
@@ -1488,41 +1311,18 @@
             cachedColorProfiles = null;
 
             isScanning = true;
-            scanStage = 1;
-            statusText.innerText = "QR繝・う繝ｳ繧偵が閾ｪ蜍暮・蛻晄悄縺ｧ謗｢邏｢荳ｭ...";
-            requestAnimationFrame(scanLoop);
-            return;
 
-            if (scanMode === 'digital_sign') {
-                // ★ Stage1から再開（QR1は暗号化されていないため、sysEncDecode無しで読む必要がある）
-                digitalSignStage3 = false;
-                scanStage = 1;
-                statusText.innerText = "電子署名モード: 第1QRを探索中...";
-            } else if (scanMode === 'color_enc') {
-                scanStage = 1;
-                statusText.innerText = "Scanning Color QR Twin...";
-            } else if (scanMode === 'new_color_enc') {
-                resetNewColorScanState();
-                scanStage = 1;
-                statusText.innerText = "カラーQRツインの第1QRを探索中...";
-            } else if (scanMode === 'normal') {
-                scanStage = 1;
-                statusText.innerText = "Scanning QR1... (Hybrid)";
-            } else {
-                scanStage = 1;
-                statusText.innerText = "Scanning encrypted QR1...";
-            }
+            // ★ 自動識別モード: 全モード共通でStage 1から再開
+            detectedMode = 'normal'; // 再スキャン時はリセット（第1QR読取後に再判定される）
+            resetNewColorScanState();
+            digitalSignStage3 = false;
+            scanStage = 1;
+            statusText.innerText = "QRツインを探索中...";
 
             requestAnimationFrame(scanLoop);
         }
 
-        // === Color QR Twin Mode ===
-        document.getElementById('colorEncModeBtn').addEventListener('click', () => {
-            scanMode = 'color_enc';
-            document.getElementById('headerText').innerText = 'QR Twin Reader (Color Enc)';
-            document.getElementById('colorSettingsScreen').style.display = 'flex';
-        });
-
+        // === Color QR Twin Mode (旧モード、自動識別対象外) ===
         let colorEncDarkName = 'red';
         let colorEncLightName = 'yellow';
 
@@ -3564,8 +3364,8 @@
             }
 
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-            const hideFirstQrHighlight = scanMode === 'digital_sign' && digitalSignStage3 && firstQR && !secondQR;
-            const hideSecondQrHighlight = scanMode === 'digital_sign' && digitalSignStage3 && secondQR && !firstQR;
+            const hideFirstQrHighlight = detectedMode === 'digital_sign' && digitalSignStage3 && firstQR && !secondQR;
+            const hideSecondQrHighlight = detectedMode === 'digital_sign' && digitalSignStage3 && secondQR && !firstQR;
             if (firstQR && firstQR.points && !hideFirstQrHighlight) drawBoundingBox(firstQR.points, '#00E676');
             if (secondQR && secondQR.points && !hideSecondQrHighlight) drawBoundingBox(secondQR.points, '#29B6F6');
 
@@ -3576,161 +3376,13 @@
 
                 try {
                     // === 新カラー符号化モード ===
-                    if (scanMode === 'new_color_enc') {
-                        // 新カラー符号化モード: 第1QR（白黒、ツインの表面）を通常読取りし、
-                        // 管理ビットから3領域/4領域を判別する。
+                    if (detectedMode === 'new_color_enc') {
+                        // 新カラー符号化モード: 第1QR（白黒、ツインの表面）は共通Stage1で読取済み。
                         // カラー部分（第2QR以降）はカメラからの色分離で読取る。
-
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
 
-                        if (newColorScanStage === 0) {
-                            // Stage 0: 第1QRを探索
-                            // ネイティブBarcodeDetector + jsQRハイブリッド
-                            let q1Found = null;
-
-                            if (barcodeDetector) {
-                                try {
-                                    const barcodes = await barcodeDetector.detect(video);
-                                    if (barcodes && barcodes.length > 0) {
-                                        for (const b of barcodes) {
-                                            const bbox = b.boundingBox;
-                                            const PADDING = Math.max(50, Math.floor(bbox.width * 0.5));
-                                            const sx = Math.max(0, Math.floor(bbox.x) - PADDING);
-                                            const sy = Math.max(0, Math.floor(bbox.y) - PADDING);
-                                            const sw = Math.min(vw - sx, Math.ceil(bbox.width) + PADDING * 2);
-                                            const sh = Math.min(vh - sy, Math.ceil(bbox.height) + PADDING * 2);
-                                            zxingCanvas.width = sw;
-                                            zxingCanvas.height = sh;
-                                            zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-                                            const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-                                            const res = jsQR(imgData.data, sw, sh, { inversionAttempts: 'attemptBoth' });
-                                            if (res && res.data && !res.isRaw) {
-                                                const qrNo = getQrNumber(res);
-                                                if (qrNo === 0) {
-                                                    q1Found = offsetQrResult(res, sx, sy);
-                                                    // 領域を保存
-                                                    lastTwinBBox = {
-                                                        x: sx, y: sy, width: sw, height: sh
-                                                    };
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                } catch(e) { /* ignore */ }
-                            }
-
-                            // BarcodeDetectorで見つからなかった場合、フルスクリーンjsQR
-                            if (!q1Found) {
-                                zxingCanvas.width = vw;
-                                zxingCanvas.height = vh;
-                                zxingCtx.drawImage(video, 0, 0, vw, vh);
-                                const fullData = zxingCtx.getImageData(0, 0, vw, vh);
-                                const res = jsQR(fullData.data, vw, vh, { inversionAttempts: 'attemptBoth' });
-                                if (res && res.data && !res.isRaw) {
-                                    const qrNo = getQrNumber(res);
-                                    if (qrNo === 0) {
-                                        q1Found = res;
-                                        if (res.location) {
-                                            const pts = [
-                                                res.location.topLeftCorner, res.location.topRightCorner,
-                                                res.location.bottomRightCorner, res.location.bottomLeftCorner
-                                            ].filter(Boolean);
-                                            if (pts.length === 4) {
-                                                const xs = pts.map(p => p.x);
-                                                const ys = pts.map(p => p.y);
-                                                lastTwinBBox = {
-                                                    x: Math.min(...xs), y: Math.min(...ys),
-                                                    width: Math.max(...xs) - Math.min(...xs),
-                                                    height: Math.max(...ys) - Math.min(...ys)
-                                                };
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (q1Found) {
-                                const mgmtInfo = parseNewColorMgmt(q1Found.managementCode, q1Found.managementFlags16);
-                                if (!mgmtInfo || mgmtInfo.regionCount < 3) {
-                                    // 2色（通常モード）のQRを検出した場合、新カラーモードではないので無視
-                                    statusText.innerText = "カラーQRツインの第1QRを探索中... (通常QR検出、スキップ)";
-                                } else {
-                                    // 読取期限チェック
-                                    if (q1Found.expiryExt32 !== undefined && !checkExpiry(q1Found.expiryExt32)) {
-                                        isScanning = false; isProcessing = false;
-                                        showResultScreen(null, "読み取りの有効期間が終了しました");
-                                        return;
-                                    }
-                                    // 読取者IDチェック
-                                    if (q1Found.readerIdExt32 !== undefined) {
-                                        if (!matchesRegisteredTerminalId(q1Found.readerIdExt32)) {
-                                            isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取端末IDが一致しません");
-                                            return;
-                                        }
-                                    }
-                                    // 読取位置チェック
-                                    if (q1Found.locationLatExt24 !== undefined && q1Found.locationLonExt24 !== undefined) {
-                                        const locMatch = await checkLocation(q1Found.locationLatExt24, q1Found.locationLonExt24);
-                                        if (!locMatch) {
-                                            isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取位置が一致しません");
-                                            return;
-                                        }
-                                    }
-                                    // 市町村コードチェック
-                                    if (q1Found.municipalityExt24 !== undefined) {
-                                        const muniMatch = await checkMunicipality(q1Found.municipalityExt24);
-                                        if (!muniMatch) {
-                                            isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "市町村コードが一致しません");
-                                            return;
-                                        }
-                                    }
-
-                                    newColorQ1Data = {
-                                        text: q1Found.data,
-                                        managementCode: q1Found.managementCode,
-                                        managementFlags16: q1Found.managementFlags16,
-                                        managementExt32: q1Found.managementExt32,
-                                        mgmtInfo: mgmtInfo,
-                                        creationDateTimeExt32: q1Found.creationDateTimeExt32,
-                                        codewords: q1Found.codewords,
-                                        dataBytes: q1Found.dataBytes,
-                                        location: q1Found.location,
-                                        version: q1Found.version
-                                    };
-                                    newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
-                                    const rStr = mgmtInfo.regionCount === 4 ? '4領域化(8色)' : '3領域化(4色)';
-                                    if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
-
-                                    if (newColorModeNeedsPassword(mgmtInfo) && !appMask) {
-                                        newColorScanStage = 0;
-                                        isProcessing = false;
-                                        showPasswordScreen(
-                                            q1Found.data,
-                                            '第1QRを読取済み。新カラー復号用のパスワード入力待ちです。'
-                                        );
-                                        return;
-                                    }
-
-                                    newColorScanStage = 1;
-                                    statusText.innerText = '第1QR検出: ' + rStr + ' / 第2QR以降を探索中...';
-
-                                    // 描画: Q1のバウンディングボックス
-                                    if (q1Found.location) {
-                                        const pts = [
-                                            q1Found.location.topLeftCorner, q1Found.location.topRightCorner,
-                                            q1Found.location.bottomRightCorner, q1Found.location.bottomLeftCorner
-                                        ].filter(Boolean);
-                                        if (pts.length === 4) drawBoundingBox(pts, '#00E676');
-                                    }
-                                }
-                            }
-
-                        } else if (newColorScanStage === 1 && newColorQ1Data) {
+                        if (newColorScanStage === 1 && newColorQ1Data) {
                             const mgmtInfo = newColorQ1Data.mgmtInfo;
                             if (!newColorScanResult) {
                                 newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
@@ -3774,7 +3426,7 @@
                     }
 
                     // === Color QR Twin Mode (focused scan + fast RGB projection) ===
-                    if (scanMode === 'color_enc') {
+                    if (detectedMode === 'color_enc') {
                         colorScanAttemptCount++;
                         const vw = video.videoWidth;
                         const vh = video.videoHeight;
@@ -3837,9 +3489,9 @@
                     let detectedItems = [];
 
                     // === モード共通フラグ ===
-                    const needSysEncForStage1 = (scanMode === 'double' && scanStage === 1);
-                    const needSysEncForStage3 = (scanMode === 'normal' && scanStage === 3 && sysEncStage3);
-                    const needSysEncForDigitalSign = (scanMode === 'digital_sign' && scanStage === 3 && digitalSignStage3);
+                    const needSysEncForStage1 = (detectedMode === 'double_enc' && scanStage === 1);
+                    const needSysEncForStage3 = (detectedMode === 'sys_enc' && scanStage === 3 && sysEncStage3);
+                    const needSysEncForDigitalSign = (detectedMode === 'digital_sign' && scanStage === 3 && digitalSignStage3);
 
                     // ★ BarcodeDetectorは全モードのStage 1で常に使用（二重暗号化含む）
                     // Stage 3ではappMask/sysEnc/digitalSignが必要な場合はPhase 2で別途処理
@@ -3888,7 +3540,6 @@
                                                     municipalityExt24: res.municipalityExt24,
                                                     codewords: res.codewords,
                                                     dataBytes: res.dataBytes,
-                                                    version: res.version,
                                                     points: res.location ? [
                                                         res.location.topLeftCorner,
                                                         res.location.topRightCorner,
@@ -3935,7 +3586,6 @@
                                                         municipalityExt24: res.municipalityExt24,
                                                         codewords: res.codewords,
                                                         dataBytes: res.dataBytes,
-                                                        version: res.version,
                                                         points: [
                                                             { x: res.location.topLeftCorner.x + sx, y: res.location.topLeftCorner.y + sy },
                                                             { x: res.location.topRightCorner.x + sx, y: res.location.topRightCorner.y + sy },
@@ -3996,7 +3646,6 @@
                                                     municipalityExt24: cropRes.municipalityExt24,
                                                     codewords: cropRes.codewords,
                                                     dataBytes: cropRes.dataBytes,
-                                                    version: cropRes.version,
                                                     points: [
                                                         { x: cropRes.location.topLeftCorner.x + sx, y: cropRes.location.topLeftCorner.y + sy },
                                                         { x: cropRes.location.topRightCorner.x + sx, y: cropRes.location.topRightCorner.y + sy },
@@ -4014,7 +3663,7 @@
 
                     // --- [フェーズ 2.5] Stage 1位置再利用 + jsQRクロップ復号 (二重暗号化などBarcodeDetector失敗時用) ---
                     // Stage 1で既にツインの座標を取得しているため、その周辺だけを探すことでフルスクリーンを回避する
-                    if (detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3 || (scanMode === 'auto' && firstQR && !sysEncStage3)) && lastTwinBBox) {
+                    if (detectedItems.length === 0 && scanStage === 3 && (appMask || digitalSignStage3) && lastTwinBBox) {
                         const bbox = lastTwinBBox;
                         const PADDING = Math.max(80, Math.floor(bbox.width * 0.6)); // 多少のカメラ揺れを吸収するため広めに
                         const sx = Math.max(0, Math.floor(bbox.x) - PADDING);
@@ -4034,7 +3683,7 @@
                             };
                             if (appMask) {
                                 cropOpts.appEncMask = Array.from(appMask);
-                            } else if (digitalSignStage3 || (scanMode === 'auto' && firstQR && !sysEncStage3)) {
+                            } else if (digitalSignStage3) {
                                 cropOpts.sysEncDecode = true;
                             }
                             const cropResList = jsQR(imgData.data, sw, sh, cropOpts);
@@ -4055,8 +3704,6 @@
                                             locationLonExt24: cropRes.locationLonExt24,
                                             municipalityExt24: cropRes.municipalityExt24,
                                             codewords: cropRes.codewords,
-                                            dataBytes: cropRes.dataBytes,
-                                            version: cropRes.version,
                                             points: [
                                                 { x: cropRes.location.topLeftCorner.x + sx, y: cropRes.location.topLeftCorner.y + sy },
                                                 { x: cropRes.location.topRightCorner.x + sx, y: cropRes.location.topRightCorner.y + sy },
@@ -4100,6 +3747,17 @@
                         let resFullList = jsQR(fullData.data, fullData.width, fullData.height, opts);
                         if (resFullList && !Array.isArray(resFullList)) resFullList = [resFullList];
 
+                        // ★ 自動識別時の二重暗号化QR1探索用フォールバック
+                        if (scanStage === 1 && (!resFullList || resFullList.length === 0)) {
+                            // もしかしたらQR1がシステム暗号化された二重暗号化ツインかもしれないので、
+                            // sysEncDecode=trueで再探索する
+                            const sysEncOpts = Object.assign({}, opts, { sysEncDecode: true, multi: true });
+                            let sysEncResList = jsQR(fullData.data, fullData.width, fullData.height, sysEncOpts);
+                            if (sysEncResList) {
+                                resFullList = Array.isArray(sysEncResList) ? sysEncResList : [sysEncResList];
+                            }
+                        }
+
                         if (resFullList && resFullList.length > 0) {
                             for (let resFull of resFullList) {
                                 if (resFull && resFull.data) {
@@ -4119,7 +3777,6 @@
                                         municipalityExt24: resFull.municipalityExt24,
                                         codewords: resFull.codewords,
                                         dataBytes: resFull.dataBytes,
-                                        version: resFull.version,
                                         points: [
                                             resFull.location.topLeftCorner,
                                             resFull.location.topRightCorner,
@@ -4133,58 +3790,12 @@
                     }
 
                     // --- 結果処理ループ ---
-                    if (detectedItems.length === 0 && scanMode === 'auto' && (scanStage === 1 || (scanStage === 3 && !appMask && !sysEncStage3 && firstQR))) {
-                        autoSysEncProbeCount++;
-                        if (autoSysEncProbeCount % 3 === 0) {
-                            zxingCanvas.width = overlayCanvas.width;
-                            zxingCanvas.height = overlayCanvas.height;
-                            zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
-                            const autoSysData = zxingCtx.getImageData(0, 0, zxingCanvas.width, zxingCanvas.height);
-                            let autoSysList = jsQR(autoSysData.data, autoSysData.width, autoSysData.height, {
-                                inversionAttempts: "attemptBoth",
-                                sysEncDecode: true,
-                                multi: true
-                            });
-                            if (autoSysList && !Array.isArray(autoSysList)) autoSysList = [autoSysList];
-                            if (autoSysList && autoSysList.length > 0) {
-                                for (const autoRes of autoSysList) {
-                                    if (!autoRes || !autoRes.data || autoRes.isRaw) continue;
-                                    detectedItems.push({
-                                        data: autoRes.data,
-                                        managementCode: autoRes.managementCode,
-                                        managementCode32: autoRes.managementCode32,
-                                        managementFlags16: autoRes.managementFlags16,
-                                        creationDateTimeExt32: autoRes.creationDateTimeExt32,
-                                        managementExt32: autoRes.managementExt32,
-                                        expiryExt32: autoRes.expiryExt32,
-                                        readerIdExt32: autoRes.readerIdExt32,
-                                        locationLatExt24: autoRes.locationLatExt24,
-                                        locationLonExt24: autoRes.locationLonExt24,
-                                        municipalityExt24: autoRes.municipalityExt24,
-                                        codewords: autoRes.codewords,
-                                        dataBytes: autoRes.dataBytes,
-                                        version: autoRes.version,
-                                        points: [
-                                            autoRes.location.topLeftCorner,
-                                            autoRes.location.topRightCorner,
-                                            autoRes.location.bottomRightCorner,
-                                            autoRes.location.bottomLeftCorner
-                                        ]
-                                    });
-                                }
-                            }
-                        }
-                    } else if (scanStage === 1) {
-                        autoSysEncProbeCount = 0;
-                    }
-
                     for (let item of detectedItems) {
                         const { data: resultData, managementCode: resultMgmt, points: resultPts } = item;
                         const mgmtCode32 = item.managementCode32 !== undefined && item.managementCode32 !== null
                             ? (item.managementCode32 >>> 0)
                             : getManagementCode32FromParts(resultMgmt, item.managementFlags16);
                         const mgmtInfo = parseStandardMgmt(mgmtCode32);
-                        const newColorMgmtInfo = parseNewColorMgmt(mgmtCode32, item.managementFlags16);
                         const qrNo = mgmtInfo ? mgmtInfo.qrNo : null;
 
                         if (scanStage === 1) {
@@ -4198,21 +3809,13 @@
                                 };
                             }
 
-                            // 1) 通常モードでは何もしない（誤判定防止）
-                            //   ただし、電子署名ビットが立っている場合は、通常データとして扱う
-                            //   以前のように自動遷移は行わない
-                            
-                            // 2) デジタル署名モードの初期処理はここではなく、Stage3で扱うが、
-                            //    もしStage1で何らかの理由でここに来た場合は、Stage3へ導く
-                            if (scanMode === 'auto' && qrNo === 1 && mgmtInfo && mgmtInfo.dataTypeBits === 2) {
-                                secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts };
-                                scanMode = 'digital_sign';
-                                enterDigitalSignPairScan(0);
-                                statusText.innerText = "第1QRを探索中...";
-                                continue;
-                            }
+                            // ★ 自動識別: 管理部からQRツインの種類を判定
+                            detectedMode = classifyQrTwinType(mgmtInfo);
+                            document.getElementById('headerText').innerText = 'QR Twin Reader (' + getModeLabel(detectedMode) + ')';
+                            console.log('[AutoDetect] Mode:', detectedMode, 'mgmtInfo:', mgmtInfo);
 
-                            if (scanMode === 'digital_sign') {
+                            // ★ 電子署名モード: Stage1で第1QRを検出したら、第2QR（システム暗号化署名データ）を探索
+                            if (detectedMode === 'digital_sign') {
                                 if (qrNo === 0) {
                                     firstQR = {
                                         text: resultData,
@@ -4226,41 +3829,8 @@
                                         municipalityExt24: item.municipalityExt24,
                                         points: resultPts,
                                         codewords: item.codewords,
-                                        dataBytes: item.dataBytes,
-                                        version: item.version
+                                        dataBytes: item.dataBytes
                                     };
-                                    // 読取期限チェック
-                                    if (firstQR.expiryExt32 !== undefined && !checkExpiry(firstQR.expiryExt32)) {
-                                        isScanning = false; isProcessing = false;
-                                        showResultScreen(null, "読み取りの有効期間が終了しました");
-                                        return;
-                                    }
-                                    // 読取者IDチェック
-                                    if (firstQR.readerIdExt32 !== undefined) {
-                                        if (!matchesRegisteredTerminalId(firstQR.readerIdExt32)) {
-                                            isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取端末IDが一致しません");
-                                            return;
-                                        }
-                                    }
-                                    // 読取位置チェック
-                                    if (firstQR.locationLatExt24 !== undefined && firstQR.locationLonExt24 !== undefined) {
-                                        const locMatch = await checkLocation(firstQR.locationLatExt24, firstQR.locationLonExt24);
-                                        if (!locMatch) {
-                                            isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "読取位置が一致しません");
-                                            return;
-                                        }
-                                    }
-                                    // 市町村コードチェック
-                                    if (firstQR.municipalityExt24 !== undefined) {
-                                        const muniMatch = await checkMunicipality(firstQR.municipalityExt24);
-                                        if (!muniMatch) {
-                                            isScanning = false; isProcessing = false;
-                                            showResultScreen(null, "市町村コードが一致しません");
-                                            return;
-                                        }
-                                    }
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
                                     enterDigitalSignPairScan(1);
                                 } else if (qrNo === 1) {
@@ -4273,7 +3843,7 @@
                                 continue;
                             }
 
-                            // 2) デジタル署名ではない通常のStage 1処理（第1QRのみ受け入れ）
+                            // ★ 電子署名以外: 第1QR(qrNo=0)のみ受け入れ
                             if (qrNo !== 0) continue;
 
                             firstQR = {
@@ -4288,8 +3858,7 @@
                                 municipalityExt24: item.municipalityExt24,
                                 points: resultPts,
                                 codewords: item.codewords,
-                                dataBytes: item.dataBytes,
-                                version: item.version
+                                dataBytes: item.dataBytes
                             };
 
                             // ★ 読取期限チェック（全モード共通）
@@ -4326,37 +3895,6 @@
                             }
 
                             // 同一データフラグ
-                            if (scanMode === 'auto' && newColorMgmtInfo && newColorMgmtInfo.regionCount >= 3) {
-                                scanMode = 'new_color_enc';
-                                newColorQ1Data = {
-                                    text: resultData,
-                                    managementCode: resultMgmt,
-                                    managementFlags16: item.managementFlags16,
-                                    managementExt32: item.managementExt32,
-                                    mgmtInfo: newColorMgmtInfo,
-                                    creationDateTimeExt32: item.creationDateTimeExt32,
-                                    codewords: item.codewords,
-                                    dataBytes: item.dataBytes,
-                                    location: item.points ? {
-                                        topLeftCorner: item.points[0],
-                                        topRightCorner: item.points[1],
-                                        bottomRightCorner: item.points[2],
-                                        bottomLeftCorner: item.points[3]
-                                    } : null,
-                                    version: item.version
-                                };
-                                newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
-                                if (newColorModeNeedsPassword(newColorMgmtInfo) && !appMask) {
-                                    newColorScanStage = 0;
-                                    isProcessing = false;
-                                    showPasswordScreen(resultData, '第1QRを読み取りました。新カラー復号用のパスワードを入力してください。');
-                                    return;
-                                }
-                                newColorScanStage = 1;
-                                statusText.innerText = '第1QR読取済み / 第2QR以降を解析中...';
-                                continue;
-                            }
-
                             if (mgmtInfo && mgmtInfo.sameDataFlag) {
                                 secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts };
                                 isScanning = false;
@@ -4365,102 +3903,91 @@
                                 return;
                             }
 
-                            const encBits = mgmtInfo ? (mgmtInfo.encryptionBits & 0x3) : 0;
-                            const isDoubleEnc = encBits === 0x3;
-                            const isSysEncOnly = encBits === 0x2;
-                            const isAppEncOnly = encBits === 0x1;
-                            if (scanMode === 'auto') {
-                                if (isDoubleEnc) {
-                                    scanMode = 'double';
-                                } else {
-                                    scanMode = 'normal';
-                                }
-                            }
+                            // ★ 自動識別による分岐
+                            if (detectedMode === 'new_color_enc') {
+                                // 新カラーモード: Phase 1で検出したQ1のデータを保存し、Stage 1へ遷移
+                                newColorQ1Data = {
+                                    text: firstQR.text,
+                                    managementCode: firstQR.managementCode,
+                                    managementFlags16: item.managementFlags16, // jsQR結果
+                                    managementExt32: firstQR.managementExt32,
+                                    mgmtInfo: mgmtInfo,
+                                    creationDateTimeExt32: firstQR.creationDateTimeExt32,
+                                    codewords: firstQR.codewords,
+                                    dataBytes: firstQR.dataBytes,
+                                    location: {
+                                        topLeftCorner: resultPts[0],
+                                        topRightCorner: resultPts[1],
+                                        bottomRightCorner: resultPts[2],
+                                        bottomLeftCorner: resultPts[3]
+                                    },
+                                    version: item.version
+                                };
+                                newColorScanResult = { qr2: null, qr3: null, qr4: null, attempts: 0, _q2Seed: null, _q4Seed: null };
+                                
+                                const rStr = mgmtInfo.regionCount === 4 ? '4領域化(8色)' : '3領域化(4色)';
+                                if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
 
-                            if (scanMode === 'normal' && isDoubleEnc) {
-                                scanMode = 'double';
-                            }
+                                if (newColorModeNeedsPassword(mgmtInfo) && !appMask) {
+                                    newColorScanStage = 0;
+                                    isProcessing = false;
+                                    showPasswordScreen(
+                                        firstQR.text,
+                                        '第1QRを読取済み。新カラー復号用のパスワード入力待ちです。'
+                                    );
+                                    return;
+                                }
 
-                            if (scanMode === 'normal') {
-                                if (isSysEncOnly) {
-                                    // ★ フレームキャプチャ（QR2オフラインデコード用）
-                                    if (!capturedFrameForQ2) {
-                                        try {
-                                            const vw = video.videoWidth, vh = video.videoHeight;
-                                            const capCv = document.createElement('canvas');
-                                            capCv.width = vw; capCv.height = vh;
-                                            const capCtx = capCv.getContext('2d');
-                                            capCtx.drawImage(video, 0, 0, vw, vh);
-                                            capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                            capturedFrameW = vw; capturedFrameH = vh;
-                                        } catch(e) { capturedFrameForQ2 = null; }
-                                    }
-                                    let autoSysDecoded = false;
-                                    for (const decodeOpts of [
-                                        { inversionAttempts: "attemptBoth", sysEncDecode: true, multi: true },
-                                        { inversionAttempts: "attemptBoth", sysEncDecode: true },
-                                        { inversionAttempts: "dontInvert", sysEncDecode: true, multi: true },
-                                        { inversionAttempts: "dontInvert", sysEncDecode: true }
-                                    ]) {
-                                        if (tryDecodeQ2FromCapturedFrame(decodeOpts)) {
-                                            autoSysDecoded = true;
-                                            break;
-                                        }
-                                    }
-                                    if (autoSysDecoded) {
-                                        capturedFrameForQ2 = null;
-                                        isScanning = false;
-                                        isProcessing = false;
-                                        showResultScreen();
-                                        return;
-                                    }
-                                    isProcessing = false;
-                                    showSysEncScreen();
-                                    return;
-                                } else if (isAppEncOnly) {
-                                    // ★ フレームキャプチャ（QR2オフラインデコード用）
-                                    try {
-                                        const vw = video.videoWidth, vh = video.videoHeight;
-                                        const capCv = document.createElement('canvas');
-                                        capCv.width = vw; capCv.height = vh;
-                                        const capCtx = capCv.getContext('2d');
-                                        capCtx.drawImage(video, 0, 0, vw, vh);
-                                        capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                        capturedFrameW = vw; capturedFrameH = vh;
-                                    } catch(e) { capturedFrameForQ2 = null; }
-                                    isProcessing = false;
-                                    showPasswordScreen();
-                                    return;
-                                } else {
-                                    scanStage = 3;
-                                    statusText.innerText = "第2QRを探索中...";
-                                }
-                            } else {
-                                // 二重暗号化モード ★ フレームキャプチャ
-                                if (!capturedFrameForQ2) {
-                                    try {
-                                        const vw = video.videoWidth, vh = video.videoHeight;
-                                        const capCv = document.createElement('canvas');
-                                        capCv.width = vw; capCv.height = vh;
-                                        const capCtx = capCv.getContext('2d');
-                                        capCtx.drawImage(video, 0, 0, vw, vh);
-                                        capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
-                                        capturedFrameW = vw; capturedFrameH = vh;
-                                    } catch(e) { capturedFrameForQ2 = null; }
-                                }
-                                const autoDoubleDecoded = await tryDecodeDoubleEncFromCapturedFrame(firstQR ? firstQR.text : resultData, item.creationDateTimeExt32);
-                                if (autoDoubleDecoded) {
-                                    capturedFrameForQ2 = null;
-                                    isScanning = false;
-                                    isProcessing = false;
-                                    scanMode = 'double';
-                                    showResultScreen();
-                                    return;
-                                }
-                                appMask = null;
+                                newColorScanStage = 1;
+                                isProcessing = false;
+                                statusText.innerText = '第1QR検出: ' + rStr + ' / 第2QR以降を探索中...';
+                                return; // 次のフレームでカラー部分を読み取る
+                            } else if (detectedMode === 'double_enc') {
+                                // 二重暗号化モード: フレームキャプチャ → DoubleEnc画面
+                                try {
+                                    const vw = video.videoWidth, vh = video.videoHeight;
+                                    const capCv = document.createElement('canvas');
+                                    capCv.width = vw; capCv.height = vh;
+                                    const capCtx = capCv.getContext('2d');
+                                    capCtx.drawImage(video, 0, 0, vw, vh);
+                                    capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
+                                    capturedFrameW = vw; capturedFrameH = vh;
+                                } catch(e) { capturedFrameForQ2 = null; }
                                 isProcessing = false;
                                 showDoubleEncScreen();
                                 return;
+                            } else if (detectedMode === 'sys_enc') {
+                                // システム暗号化モード: フレームキャプチャ → SysEnc画面
+                                try {
+                                    const vw = video.videoWidth, vh = video.videoHeight;
+                                    const capCv = document.createElement('canvas');
+                                    capCv.width = vw; capCv.height = vh;
+                                    const capCtx = capCv.getContext('2d');
+                                    capCtx.drawImage(video, 0, 0, vw, vh);
+                                    capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
+                                    capturedFrameW = vw; capturedFrameH = vh;
+                                } catch(e) { capturedFrameForQ2 = null; }
+                                isProcessing = false;
+                                showSysEncScreen();
+                                return;
+                            } else if (detectedMode === 'app_enc') {
+                                // ユーザ暗号化モード: フレームキャプチャ → パスワード画面
+                                try {
+                                    const vw = video.videoWidth, vh = video.videoHeight;
+                                    const capCv = document.createElement('canvas');
+                                    capCv.width = vw; capCv.height = vh;
+                                    const capCtx = capCv.getContext('2d');
+                                    capCtx.drawImage(video, 0, 0, vw, vh);
+                                    capturedFrameForQ2 = capCtx.getImageData(0, 0, vw, vh);
+                                    capturedFrameW = vw; capturedFrameH = vh;
+                                } catch(e) { capturedFrameForQ2 = null; }
+                                isProcessing = false;
+                                showPasswordScreen();
+                                return;
+                            } else {
+                                // ノーマル: そのままStage 3へ
+                                scanStage = 3;
+                                statusText.innerText = "第2QRを探索中...";
                             }
                         }
                         else if (scanStage === 3) {
@@ -4482,8 +4009,7 @@
                                         municipalityExt24: item.municipalityExt24,
                                         points: resultPts,
                                         codewords: item.codewords,
-                                        dataBytes: item.dataBytes,
-                                        version: item.version
+                                        dataBytes: item.dataBytes
                                     };
                                     // 読取期限チェック
                                     if (firstQR.expiryExt32 !== undefined && !checkExpiry(firstQR.expiryExt32)) {
@@ -4523,8 +4049,6 @@
 
                                 // 必要な両方のQRが揃った → 電子署名の検証を実行
                                 if (firstQR && secondQR) {
-                                    finalizeDigitalSignaturePairScan();
-                                    return;
                                     isScanning = false;
                                     isProcessing = false;
                                     statusText.innerText = "電子署名を検証中...";
@@ -4591,11 +4115,6 @@
                             if (!diffTxt && !diffMgmt) continue;
 
                             secondQR = { text: resultData, managementCode: resultMgmt, points: resultPts };
-                            if ((mgmtInfo && mgmtInfo.dataTypeBits === 2) || decodeDigitalSignaturePayloadText(resultData)) {
-                                scanMode = 'digital_sign';
-                                finalizeDigitalSignaturePairScan();
-                                return;
-                            }
                             isScanning = false;
                             isProcessing = false;
                             showResultScreen();
