@@ -10,7 +10,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>QR Twin Reader1</title>
+    <title>QR Twin Reader</title>
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icon.png">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -69,7 +69,7 @@
 </head>
 <body>
 
-    <div class="header" id="headerText">QR Twin Reader1</div>
+    <div class="header" id="headerText">QR Twin Reader</div>
     
     <div class="camera-container">
         <video id="camera" playsinline autoplay muted></video>
@@ -115,9 +115,9 @@
                 <label>第1QRのデータ</label>
                 <div class="text" id="qr1PreviewText">-</div>
             </div>
-            <p>パスワードを入力してスキャン再開</p>
+            <p>パスワードを入力して保持済み第2QRを復号</p>
             <input type="password" id="appPasswordInput" placeholder="Password" />
-            <button class="btn" onclick="submitPassword()">スキャン再開</button>
+            <button class="btn" onclick="submitPassword()">復号実行</button>
             <button class="btn secondary" onclick="cancelPassword()">キャンセル</button>
         </div>
     </div>
@@ -131,8 +131,8 @@
                 <label>第1QRのデータ</label>
                 <div class="text" id="sysEncQr1Text">-</div>
             </div>
-            <p id="sysEncMsg">スキャン再開で第2QRを復号します</p>
-            <button class="btn sys-enc" id="sysEncResumeBtn" onclick="resumeAfterSysEnc()">スキャン再開</button>
+            <p id="sysEncMsg">保持済み第2QRをシステム復号します</p>
+            <button class="btn sys-enc" id="sysEncResumeBtn" onclick="resumeAfterSysEnc()">復号実行</button>
             <button class="btn secondary" onclick="cancelSysEnc()">キャンセル</button>
         </div>
     </div>
@@ -148,7 +148,7 @@
             </div>
             <p>パスワードAを入力</p>
             <input type="password" id="doubleEncPasswordInput" placeholder="Password" />
-            <button class="btn double-enc" onclick="resumeAfterDoubleEnc()">スキャン再開</button>
+            <button class="btn double-enc" onclick="resumeAfterDoubleEnc()">復号実行</button>
             <button class="btn secondary" onclick="cancelDoubleEnc()">キャンセル</button>
         </div>
     </div>
@@ -869,6 +869,7 @@
         document.getElementById('startScanBtn').addEventListener('click', () => {
             detectedMode = 'normal'; // 初期値、第1QR読取後に自動更新される
             appMask = null;
+            clearHeldQ2Data(true);
             resetNewColorScanState();
             document.getElementById('headerText').innerText = 'QR Twin Reader';
             startCamera();
@@ -924,6 +925,243 @@
             goBack();
         }
 
+        function clearHeldQ2Data(includeFrame = false) {
+            capturedRawForQ2 = null;
+            capturedDecodedForQ2 = null;
+            if (includeFrame) {
+                capturedFrameForQ2 = null;
+                capturedFrameW = 0;
+                capturedFrameH = 0;
+            }
+        }
+
+        function holdCurrentFrameForQ2(frameData = null) {
+            try {
+                if (frameData && frameData.data && frameData.width && frameData.height) {
+                    capturedFrameForQ2 = {
+                        data: new Uint8ClampedArray(frameData.data),
+                        width: frameData.width,
+                        height: frameData.height
+                    };
+                    capturedFrameW = frameData.width;
+                    capturedFrameH = frameData.height;
+                    return true;
+                }
+
+                const vw = video.videoWidth;
+                const vh = video.videoHeight;
+                if (!vw || !vh || video.readyState < 2) return false;
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = vw;
+                tempCanvas.height = vh;
+                const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+                tempCtx.drawImage(video, 0, 0, vw, vh);
+                const imageData = tempCtx.getImageData(0, 0, vw, vh);
+                capturedFrameForQ2 = {
+                    data: new Uint8ClampedArray(imageData.data),
+                    width: vw,
+                    height: vh
+                };
+                capturedFrameW = vw;
+                capturedFrameH = vh;
+                return true;
+            } catch (e) {
+                console.warn('[HoldQ2] frame capture failed:', e);
+                return false;
+            }
+        }
+
+        function pointsFromQrLocation(location, offsetX = 0, offsetY = 0) {
+            if (!location) return null;
+            const addOffset = p => p ? ({ x: p.x + offsetX, y: p.y + offsetY }) : null;
+            const points = [
+                addOffset(location.topLeftCorner),
+                addOffset(location.topRightCorner),
+                addOffset(location.bottomRightCorner),
+                addOffset(location.bottomLeftCorner)
+            ];
+            return points.every(Boolean) ? points : null;
+        }
+
+        function normalizeDecodedQrCandidate(qr, offsetX = 0, offsetY = 0) {
+            if (!qr || qr.isRaw || !qr.data) return null;
+            return {
+                data: qr.data,
+                text: qr.data,
+                managementCode: qr.managementCode,
+                managementCode32: qr.managementCode32,
+                managementFlags16: qr.managementFlags16,
+                creationDateTimeExt32: qr.creationDateTimeExt32,
+                managementExt32: qr.managementExt32,
+                expiryExt32: qr.expiryExt32,
+                readerIdExt32: qr.readerIdExt32,
+                locationLatExt24: qr.locationLatExt24,
+                locationLonExt24: qr.locationLonExt24,
+                municipalityExt24: qr.municipalityExt24,
+                codewords: qr.codewords,
+                dataBytes: qr.dataBytes,
+                points: qr.points || pointsFromQrLocation(qr.location, offsetX, offsetY)
+            };
+        }
+
+        function getCandidateQrNo(qr) {
+            try {
+                return getQrNumber(qr);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function rememberHeldQ2Candidate(qr) {
+            if (!qr) return;
+            if (qr.isRaw && qr.codewords && !capturedRawForQ2) {
+                capturedRawForQ2 = {
+                    isRaw: true,
+                    codewords: Array.from(qr.codewords),
+                    version: qr.version,
+                    formatInfo: qr.formatInfo,
+                    managementCode32: qr.managementCode32,
+                    points: qr.points || pointsFromQrLocation(qr.location)
+                };
+                return;
+            }
+
+            const decoded = normalizeDecodedQrCandidate(qr);
+            if (decoded && getCandidateQrNo(decoded) === 1) {
+                capturedDecodedForQ2 = decoded;
+            }
+        }
+
+        function decodeHeldFrameForQ2(options = {}) {
+            if (!capturedFrameForQ2 || !capturedFrameForQ2.data) return null;
+            try {
+                const opts = Object.assign({
+                    inversionAttempts: "attemptBoth",
+                    multi: true
+                }, options);
+                let resultList = jsQR(
+                    capturedFrameForQ2.data,
+                    capturedFrameForQ2.width,
+                    capturedFrameForQ2.height,
+                    opts
+                );
+                if (resultList && !Array.isArray(resultList)) resultList = [resultList];
+                if (!resultList || resultList.length === 0) return null;
+
+                for (const result of resultList) {
+                    const decoded = normalizeDecodedQrCandidate(result);
+                    if (decoded && getCandidateQrNo(decoded) === 1) {
+                        return decoded;
+                    }
+                }
+            } catch (e) {
+                console.warn('[HoldQ2] held frame decode failed:', e);
+            }
+            return null;
+        }
+
+        function refreshRawQ2FromHeldFrame() {
+            if (!capturedFrameForQ2 || capturedRawForQ2) return;
+            try {
+                let resultList = jsQR(
+                    capturedFrameForQ2.data,
+                    capturedFrameForQ2.width,
+                    capturedFrameForQ2.height,
+                    {
+                        inversionAttempts: "attemptBoth",
+                        multi: true,
+                        extractRawForFailed: true
+                    }
+                );
+                if (resultList && !Array.isArray(resultList)) resultList = [resultList];
+                if (!resultList) return;
+                for (const result of resultList) {
+                    if (result && result.isRaw) {
+                        rememberHeldQ2Candidate(result);
+                        if (capturedRawForQ2) return;
+                    }
+                }
+            } catch (e) {
+                console.warn('[HoldQ2] raw extraction failed:', e);
+            }
+        }
+
+        function prepareHeldQ2DataForMode(mode, frameData, detectedItems = []) {
+            if (mode !== 'app_enc' && mode !== 'sys_enc' && mode !== 'double_enc') return;
+
+            clearHeldQ2Data(false);
+            holdCurrentFrameForQ2(frameData);
+
+            for (const item of detectedItems) {
+                rememberHeldQ2Candidate(item);
+            }
+
+            if (mode === 'sys_enc') {
+                if (!capturedDecodedForQ2) {
+                    capturedDecodedForQ2 = decodeHeldFrameForQ2({ sysEncDecode: true });
+                }
+            } else {
+                refreshRawQ2FromHeldFrame();
+            }
+        }
+
+        function adoptSecondQrFromDecoded(decoded) {
+            if (!decoded) return false;
+            secondQR = {
+                text: decoded.data || decoded.text,
+                managementCode: decoded.managementCode,
+                managementCode32: decoded.managementCode32,
+                managementFlags16: decoded.managementFlags16,
+                managementExt32: decoded.managementExt32,
+                points: decoded.points || null,
+                codewords: decoded.codewords,
+                dataBytes: decoded.dataBytes
+            };
+            return secondQR.text !== undefined && secondQR.text !== null;
+        }
+
+        function tryDecodeHeldQ2WithAppMask(maskBytes) {
+            const maskArray = Array.from(maskBytes || []);
+
+            const decodedFromFrame = decodeHeldFrameForQ2({ appEncMask: maskArray });
+            if (adoptSecondQrFromDecoded(decodedFromFrame)) {
+                return true;
+            }
+
+            if (capturedRawForQ2) {
+                const decoded = jsQR.resumeDecode(capturedRawForQ2, maskArray);
+                if (decoded && typeof decoded.text === 'string') {
+                    secondQR = {
+                        text: decoded.text,
+                        managementCode: capturedRawForQ2.managementCode32,
+                        managementCode32: capturedRawForQ2.managementCode32,
+                        points: capturedRawForQ2.points || null
+                    };
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        function tryAdoptHeldSystemQ2() {
+            if (capturedDecodedForQ2 && adoptSecondQrFromDecoded(capturedDecodedForQ2)) {
+                return true;
+            }
+
+            const decodedFromFrame = decodeHeldFrameForQ2({ sysEncDecode: true });
+            return adoptSecondQrFromDecoded(decodedFromFrame);
+        }
+
+        function finishHeldQ2DecodeFailure(message = "1回の読み取り画像から第2QRを復号できませんでした") {
+            isScanning = false;
+            isProcessing = false;
+            scanStage = 0;
+            sysEncStage3 = false;
+            clearHeldQ2Data(true);
+            showResultScreen(null, message);
+        }
+
 
 
         async function submitPassword() {
@@ -969,58 +1207,31 @@
                 return;
             }
 
-            // ★ 保持されたデジタル情報からQR2を即座に復号試行
-            if (capturedRawForQ2) {
-                statusText.innerText = "保持データから復号中...";
-                const decoded = jsQR.resumeDecode(capturedRawForQ2, Array.from(appMask));
-                if (decoded && decoded.text) {
-                    secondQR = { 
-                        text: decoded.text, 
-                        managementCode: (capturedRawForQ2.managementCode32 !== undefined) ? capturedRawForQ2.managementCode32 : null,
-                        points: null
-                    };
-                    capturedRawForQ2 = null;
-                    capturedDecodedForQ2 = null;
-                    isScanning = false;
-                    showResultScreen();
-                    return;
-                }
+            statusText.innerText = "保持済み第2QRを復号中...";
+            if (tryDecodeHeldQ2WithAppMask(appMask)) {
+                clearHeldQ2Data(true);
+                isScanning = false;
+                isProcessing = false;
+                showResultScreen();
+                return;
             }
 
-            // フォールバック: 従来のスキャンループで第2QRを探索
-            scanStage = 3;
-            if (firstQR) firstQR.points = null;
-            statusText.innerText = "第2QRを探索中... (jsQR XOR)";
-            isScanning = true;
-            lastDetectTime = Date.now();
-            requestAnimationFrame(scanLoop);
+            finishHeldQ2DecodeFailure();
         }
 
         function resumeAfterSysEnc() {
             document.getElementById('sysEncScreen').style.display = 'none';
 
-            // ★ 保持されたデジタル情報からQR2を即座に採用試行
-            if (capturedDecodedForQ2) {
-                secondQR = { 
-                    text: capturedDecodedForQ2.data || capturedDecodedForQ2.text, 
-                    managementCode: capturedDecodedForQ2.managementCode32, 
-                    points: capturedDecodedForQ2.points || null 
-                };
-                capturedRawForQ2 = null;
-                capturedDecodedForQ2 = null;
+            statusText.innerText = "保持済み第2QRをシステム復号中...";
+            if (tryAdoptHeldSystemQ2()) {
+                clearHeldQ2Data(true);
                 isScanning = false;
+                isProcessing = false;
                 showResultScreen();
                 return;
             }
 
-            // フォールバック: 従来のスキャンループ
-            scanStage = 3;
-            sysEncStage3 = true;
-            if (firstQR) firstQR.points = null;
-            statusText.innerText = "第2QR（システム暗号化）を探索中...";
-            isScanning = true;
-            lastDetectTime = Date.now();
-            requestAnimationFrame(scanLoop);
+            finishHeldQ2DecodeFailure();
         }
 
         async function resumeAfterDoubleEnc() {
@@ -1049,31 +1260,16 @@
                 appMask = await deriveEncryptionMaskBytesAsync(pw, 5000);
             }
 
-            // ★ 保持されたデジタル情報からQR2を即座に復号試行
-            if (capturedRawForQ2) {
-                statusText.innerText = "保持データから復号中...";
-                const decoded = jsQR.resumeDecode(capturedRawForQ2, Array.from(appMask));
-                if (decoded && decoded.text) {
-                    secondQR = { 
-                        text: decoded.text, 
-                        managementCode: (capturedRawForQ2.managementCode32 !== undefined) ? capturedRawForQ2.managementCode32 : null,
-                        points: null
-                    };
-                    capturedRawForQ2 = null;
-                    capturedDecodedForQ2 = null;
-                    isScanning = false;
-                    showResultScreen();
-                    return;
-                }
+            statusText.innerText = "保持済み第2QRを復号中...";
+            if (tryDecodeHeldQ2WithAppMask(appMask)) {
+                clearHeldQ2Data(true);
+                isScanning = false;
+                isProcessing = false;
+                showResultScreen();
+                return;
             }
 
-            // フォールバック: 従来のスキャンループ
-            scanStage = 3;
-            if (firstQR) firstQR.points = null;
-            statusText.innerText = "第2QR（ユーザ暗号化）を探索中...";
-            isScanning = true;
-            lastDetectTime = Date.now();
-            requestAnimationFrame(scanLoop);
+            finishHeldQ2DecodeFailure();
         }
 
         function enterDigitalSignPairScan(waitingForQrNo) {
@@ -1256,8 +1452,7 @@
             sysEncStage3 = false;
             digitalSignStage3 = false;
             lastTwinBBox = null;
-            capturedRawForQ2 = null;
-            capturedDecodedForQ2 = null;
+            clearHeldQ2Data(true);
             resetNewColorScanState();
             
             // スキャン選択画面に戻す
@@ -1285,8 +1480,7 @@
             sysEncStage3 = false;
             digitalSignStage3 = false;
             lastTwinBBox = null;
-            capturedRawForQ2 = null;
-            capturedDecodedForQ2 = null;
+            clearHeldQ2Data(true);
             resetNewColorScanState();
             // ★ 防御的リセット：前回スキャン中の状態が残る場合に備える
             isProcessing = false;
@@ -3532,7 +3726,13 @@
                                                         codewords: res.codewords,
                                                         version: res.version,
                                                         formatInfo: res.formatInfo,
-                                                        managementCode32: (typeof getManagementCode32FromQr === 'function') ? getManagementCode32FromQr(res) : null
+                                                        managementCode32: (typeof getManagementCode32FromQr === 'function') ? getManagementCode32FromQr(res) : null,
+                                                        points: res.location ? [
+                                                            res.location.topLeftCorner,
+                                                            res.location.topRightCorner,
+                                                            res.location.bottomRightCorner,
+                                                            res.location.bottomLeftCorner
+                                                        ] : null
                                                     });
                                                 } else if (res.data) {
                                                     detectedItems.push({
@@ -3592,7 +3792,13 @@
                                                             codewords: res.codewords,
                                                             version: res.version,
                                                             formatInfo: res.formatInfo,
-                                                            managementCode32: (typeof getManagementCode32FromQr === 'function') ? getManagementCode32FromQr(res) : null
+                                                            managementCode32: (typeof getManagementCode32FromQr === 'function') ? getManagementCode32FromQr(res) : null,
+                                                            points: res.location ? [
+                                                                { x: res.location.topLeftCorner.x + sx, y: res.location.topLeftCorner.y + sy },
+                                                                { x: res.location.topRightCorner.x + sx, y: res.location.topRightCorner.y + sy },
+                                                                { x: res.location.bottomRightCorner.x + sx, y: res.location.bottomRightCorner.y + sy },
+                                                                { x: res.location.bottomLeftCorner.x + sx, y: res.location.bottomLeftCorner.y + sy }
+                                                            ] : null
                                                         });
                                                     } else if (res.data) {
                                                         detectedItems.push({
@@ -3742,7 +3948,9 @@
                     }
 
                     // --- [フェーズ 3 / Fallback] Custom jsQR Full-Screen Scan ---
-                    if (detectedItems.length === 0) {
+                    // RAWだけ見つかった状態は「まだQR本文を読めていない」ため、フルスクリーン復号を継続する。
+                    const hasDecodedDetectedItems = detectedItems.some(item => item && item.data);
+                    if (!hasDecodedDetectedItems) {
                         zxingCanvas.width = overlayCanvas.width;
                         zxingCanvas.height = overlayCanvas.height;
                         zxingCtx.drawImage(video, 0, 0, zxingCanvas.width, zxingCanvas.height);
@@ -3925,20 +4133,8 @@
                                 return;
                             }
 
-                            // ★ フェーズ1で同時に検出された第2QRのデジタル情報を保持（オフライン瞬間復号用）
-                            for (let it of detectedItems) {
-                                if (it.isRaw) {
-                                    capturedRawForQ2 = it;
-                                } else if (it.data) {
-                                    const mgmt32Q2 = it.managementCode32 !== undefined ? it.managementCode32 : ((typeof getManagementCode32FromQr === 'function') ? getManagementCode32FromQr(it) : null);
-                                    if (mgmt32Q2 !== null) {
-                                        const mgmtQ2 = typeof parseStandardMgmt === 'function' ? parseStandardMgmt(mgmt32Q2) : null;
-                                        if (mgmtQ2 && mgmtQ2.qrNo === 1) { // 1 = 第2QR
-                                            capturedDecodedForQ2 = it;
-                                        }
-                                    }
-                                }
-                            }
+                            // ★ 暗号化モードでは第1QR読取時の同一フレームから第2QRのデジタル情報を保持し、再スキャンを不要にする
+                            prepareHeldQ2DataForMode(detectedMode, currentTickFrame, detectedItems);
 
                             // ★ 自動識別による分岐
                             if (detectedMode === 'new_color_enc') {
