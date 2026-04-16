@@ -3648,46 +3648,43 @@
 
                     let detectedItems = [];
 
-                    // === 通常モード: Stage 1 ===
-                    // 二重暗号化モードの Stage 1 ではシステム暗号化された第1QRを探す
-                    // → jsQR の sysEncDecode を使う
+                    // === モード共通フラグ ===
                     const needSysEncForStage1 = (scanMode === 'double' && scanStage === 1);
-                    // 通常モードの Stage 3 でシステム暗号化された第2QRを探す場合
                     const needSysEncForStage3 = (scanMode === 'normal' && scanStage === 3 && sysEncStage3);
-                    // 電子署名モードの Stage 3 でシステム暗号化された第2QRを探す場合
                     const needSysEncForDigitalSign = (scanMode === 'digital_sign' && scanStage === 3 && digitalSignStage3);
 
+                    // ★ BarcodeDetectorは全モードのStage 1で常に使用（二重暗号化含む）
+                    // Stage 3ではappMask/sysEnc/digitalSignが必要な場合はPhase 2で別途処理
                     let useNativeDetector = barcodeDetector && (scanStage === 1 || (scanStage === 3 && !appMask && !needSysEncForStage3 && !needSysEncForDigitalSign));
-                    // システム暗号化復号が必要な場合はネイティブではなくjsQRを使う
-                    if (needSysEncForStage1 || needSysEncForDigitalSign) {
-                        useNativeDetector = false;
-                    }
 
                     let cropBBox = null;
 
                     // --- [フェーズ 1 / ネイティブ優先] Hybrid (BarcodeDetector Crop + jsQR) ---
+                    // ★ 全モード共通: BarcodeDetectorで高速位置検出 → jsQRデコード
                     if (useNativeDetector) {
                         try {
                             const barcodes = await barcodeDetector.detect(video);
                             if (barcodes && barcodes.length > 0) {
-                                for (let i = 0; i < barcodes.length; i++) {
-                                    const b = barcodes[i];
 
-                                    const bbox = b.boundingBox;
-                                    const PADDING = Math.max(50, Math.floor(bbox.width * 0.5)); 
-                                    const sx = Math.max(0, Math.floor(bbox.x) - PADDING);
-                                    const sy = Math.max(0, Math.floor(bbox.y) - PADDING);
-                                    const sw = Math.min(video.videoWidth - sx, Math.ceil(bbox.width) + PADDING * 2);
-                                    const sh = Math.min(video.videoHeight - sy, Math.ceil(bbox.height) + PADDING * 2);
-
-                                    zxingCanvas.width = sw;
-                                    zxingCanvas.height = sh;
-                                    zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-                                    const imgData = zxingCtx.getImageData(0, 0, sw, sh);
-
-                                    const resList = jsQR(imgData.data, sw, sh, { inversionAttempts: "attemptBoth", multi: true });
-                                    if (resList && resList.length > 0) {
-                                        for (const res of resList) {
+                                if (needSysEncForStage1) {
+                                    // ★ 二重暗号化 Stage 1 専用パス:
+                                    // BarcodeDetectorは「QR存在確認」のみ。デコードはフル解像度フレームで行う。
+                                    // 理由: QR Twin重層部分の干渉 + システム暗号化の組合せでは、
+                                    //        クロップ画像だと誤り訂正が限界を超えやすい。
+                                    //        フルフレーム + multi:true で jsQR に全体を渡すことで、
+                                    //        QR1とQR2を正しく分離・デコードできる確率が大幅に向上する。
+                                    const vw = video.videoWidth, vh = video.videoHeight;
+                                    zxingCanvas.width = vw;
+                                    zxingCanvas.height = vh;
+                                    zxingCtx.drawImage(video, 0, 0, vw, vh);
+                                    const fullImg = zxingCtx.getImageData(0, 0, vw, vh);
+                                    const sysResList = jsQR(fullImg.data, vw, vh, {
+                                        inversionAttempts: "attemptBoth",
+                                        sysEncDecode: true,
+                                        multi: true
+                                    });
+                                    if (sysResList && sysResList.length > 0) {
+                                        for (const res of (Array.isArray(sysResList) ? sysResList : [sysResList])) {
                                             if (res && res.data && !res.isRaw) {
                                                 detectedItems.push({
                                                     data: res.data,
@@ -3703,13 +3700,60 @@
                                                     municipalityExt24: res.municipalityExt24,
                                                     codewords: res.codewords,
                                                     dataBytes: res.dataBytes,
-                                                    points: [
-                                                        { x: res.location.topLeftCorner.x + sx, y: res.location.topLeftCorner.y + sy },
-                                                        { x: res.location.topRightCorner.x + sx, y: res.location.topRightCorner.y + sy },
-                                                        { x: res.location.bottomRightCorner.x + sx, y: res.location.bottomRightCorner.y + sy },
-                                                        { x: res.location.bottomLeftCorner.x + sx, y: res.location.bottomLeftCorner.y + sy }
-                                                    ]
+                                                    points: res.location ? [
+                                                        res.location.topLeftCorner,
+                                                        res.location.topRightCorner,
+                                                        res.location.bottomRightCorner,
+                                                        res.location.bottomLeftCorner
+                                                    ] : null
                                                 });
+                                            }
+                                        }
+                                    }
+
+                                } else {
+                                    // ★ 通常パス（ユーザ暗号化/システム暗号化/非暗号化）:
+                                    // 各検出QRをクロップ → jsQRデコード（高速）
+                                    for (let i = 0; i < barcodes.length; i++) {
+                                        const b = barcodes[i];
+                                        const bbox = b.boundingBox;
+                                        const PADDING = Math.max(50, Math.floor(bbox.width * 0.5));
+                                        const sx = Math.max(0, Math.floor(bbox.x) - PADDING);
+                                        const sy = Math.max(0, Math.floor(bbox.y) - PADDING);
+                                        const sw = Math.min(video.videoWidth - sx, Math.ceil(bbox.width) + PADDING * 2);
+                                        const sh = Math.min(video.videoHeight - sy, Math.ceil(bbox.height) + PADDING * 2);
+
+                                        zxingCanvas.width = sw;
+                                        zxingCanvas.height = sh;
+                                        zxingCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+                                        const imgData = zxingCtx.getImageData(0, 0, sw, sh);
+
+                                        const resList = jsQR(imgData.data, sw, sh, { inversionAttempts: "attemptBoth", multi: true });
+                                        if (resList && resList.length > 0) {
+                                            for (const res of resList) {
+                                                if (res && res.data && !res.isRaw) {
+                                                    detectedItems.push({
+                                                        data: res.data,
+                                                        managementCode: res.managementCode,
+                                                        managementCode32: res.managementCode32,
+                                                        managementFlags16: res.managementFlags16,
+                                                        creationDateTimeExt32: res.creationDateTimeExt32,
+                                                        managementExt32: res.managementExt32,
+                                                        expiryExt32: res.expiryExt32,
+                                                        readerIdExt32: res.readerIdExt32,
+                                                        locationLatExt24: res.locationLatExt24,
+                                                        locationLonExt24: res.locationLonExt24,
+                                                        municipalityExt24: res.municipalityExt24,
+                                                        codewords: res.codewords,
+                                                        dataBytes: res.dataBytes,
+                                                        points: [
+                                                            { x: res.location.topLeftCorner.x + sx, y: res.location.topLeftCorner.y + sy },
+                                                            { x: res.location.topRightCorner.x + sx, y: res.location.topRightCorner.y + sy },
+                                                            { x: res.location.bottomRightCorner.x + sx, y: res.location.bottomRightCorner.y + sy },
+                                                            { x: res.location.bottomLeftCorner.x + sx, y: res.location.bottomLeftCorner.y + sy }
+                                                        ]
+                                                    });
+                                                }
                                             }
                                         }
                                     }
@@ -3854,8 +3898,10 @@
                         }
 
                         // 二重暗号化モードの Stage 1: システム暗号化された第1QRを探す
+                        // ★ multi:true必須: Twin内でQR2を先に発見→sysEncDecode失敗→QR1を試さず終了、を防ぐ
                         if (needSysEncForStage1) {
                             opts.sysEncDecode = true;
+                            opts.multi = true;
                         }
 
                         let resFullList = jsQR(fullData.data, fullData.width, fullData.height, opts);
