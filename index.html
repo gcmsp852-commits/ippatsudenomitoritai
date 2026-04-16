@@ -538,6 +538,10 @@
         const HELD_Q2_MAX_DECODED_CANDIDATES = 4;
         const HELD_Q2_MAX_WAIT_MS = 900;
         const HELD_Q2_MAX_ATTEMPTS = 16;
+        const APP_ENC_BACKGROUND_RAW_CANDIDATES = 4;
+        const APP_ENC_LAST_CHANCE_MS = 520;
+        const DOUBLE_ENC_MIN_HOLD_MS = 220;
+        const DOUBLE_ENC_MIN_RAW_CANDIDATES = 2;
         const COLOR_FAST_MAX_DIM = 400;
         const COLOR_FULL_MAX_DIM = 560;
         const COLOR_FOCUS_MAX_DIM = 720;
@@ -890,14 +894,22 @@
         function showPasswordScreen(previewText = null, waitingText = null) {
             if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
             
-            isScanning = false;
             scanStage = 2;
-            statusText.innerText = waitingText || '第1QRを読取済み。パスワード入力待ちです。';
+            const keepCollecting = detectedMode === 'app_enc';
+            isScanning = keepCollecting;
+            statusText.innerText = waitingText || (keepCollecting
+                ? '第1QRを読取済み。第2QRデータを保持しながらパスワード入力待ちです。'
+                : '第1QRを読取済み。パスワード入力待ちです。');
             document.getElementById('qr1PreviewText').innerText = previewText != null
                 ? previewText
                 : ((firstQR && firstQR.text) ? firstQR.text : '-');
             document.getElementById('appPasswordInput').value = "";
             document.getElementById('passwordScreen').style.display = 'flex';
+            if (keepCollecting) {
+                isProcessing = false;
+                lastDetectTime = 0;
+                requestAnimationFrame(scanLoop);
+            }
         }
 
         function showSysEncScreen() {
@@ -1068,16 +1080,17 @@
             return [qr.version && qr.version.versionNumber ? qr.version.versionNumber : qr.version, codewords.length, head, tail].join('|');
         }
 
-        function rememberHeldQ2Candidate(qr, offsetX = 0, offsetY = 0) {
+        function rememberHeldQ2Candidate(qr, offsetX = 0, offsetY = 0, mode = detectedMode) {
             if (!qr) return;
             if (qr.isRaw && qr.codewords) {
+                const rawPoints = qr.points || pointsFromQrLocation(qr.location, offsetX, offsetY);
                 const raw = {
                     isRaw: true,
                     codewords: Array.from(qr.codewords),
                     version: qr.version,
                     formatInfo: qr.formatInfo,
                     managementCode32: qr.managementCode32,
-                    points: qr.points || pointsFromQrLocation(qr.location, offsetX, offsetY)
+                    points: rawPoints
                 };
                 const key = rawCandidateKey(raw);
                 if (key && !capturedRawCandidatesForQ2.some(item => rawCandidateKey(item) === key)) {
@@ -1139,8 +1152,9 @@
             return null;
         }
 
-        function refreshRawQ2FromHeldFrames(exhaustive = false) {
-            if (!exhaustive && capturedRawCandidatesForQ2.length > 0) return;
+        function refreshRawQ2FromHeldFrames(exhaustive = false, mode = detectedMode) {
+            if (!exhaustive && mode === 'app_enc' && capturedRawCandidatesForQ2.length >= APP_ENC_BACKGROUND_RAW_CANDIDATES) return;
+            if (!exhaustive && mode !== 'app_enc' && mode !== 'double_enc' && capturedRawCandidatesForQ2.length > 0) return;
             const frames = capturedFrameCandidatesForQ2.length > 0
                 ? capturedFrameCandidatesForQ2
                 : (capturedFrameForQ2 ? [capturedFrameForQ2] : []);
@@ -1165,10 +1179,12 @@
                             if (!resultList) continue;
                             for (const result of resultList) {
                                 if (result && result.isRaw) {
-                                    rememberHeldQ2Candidate(result, target.offsetX || 0, target.offsetY || 0);
+                                    rememberHeldQ2Candidate(result, target.offsetX || 0, target.offsetY || 0, mode);
                                 }
                             }
-                            if (!exhaustive && capturedRawCandidatesForQ2.length > 0) return;
+                            if (!exhaustive && mode === 'app_enc' && capturedRawCandidatesForQ2.length >= APP_ENC_BACKGROUND_RAW_CANDIDATES) return;
+                            if (!exhaustive && mode !== 'app_enc' && mode !== 'double_enc' && capturedRawCandidatesForQ2.length > 0) return;
+                            if (!exhaustive && mode === 'double_enc' && capturedRawCandidatesForQ2.length >= DOUBLE_ENC_MIN_RAW_CANDIDATES) return;
                         } catch (e) {
                             console.warn('[HoldQ2] raw extraction failed:', e);
                         }
@@ -1184,7 +1200,7 @@
             holdCurrentFrameForQ2(frameData);
 
             for (const item of detectedItems) {
-                rememberHeldQ2Candidate(item);
+                rememberHeldQ2Candidate(item, 0, 0, mode);
             }
 
             if (mode === 'sys_enc') {
@@ -1192,7 +1208,23 @@
                     capturedDecodedForQ2 = decodeHeldFrameForQ2({ sysEncDecode: true });
                 }
             } else {
-                refreshRawQ2FromHeldFrames(false);
+                refreshRawQ2FromHeldFrames(false, mode);
+            }
+        }
+
+        async function collectHeldQ2FramesForMode(mode, durationMs) {
+            if (mode !== 'app_enc' && mode !== 'double_enc') return;
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < durationMs) {
+                holdCurrentFrameForQ2();
+                refreshRawQ2FromHeldFrames(false, mode);
+                if (mode === 'app_enc' && capturedRawCandidatesForQ2.length >= APP_ENC_BACKGROUND_RAW_CANDIDATES) {
+                    break;
+                }
+                if (mode === 'double_enc' && capturedRawCandidatesForQ2.length >= DOUBLE_ENC_MIN_RAW_CANDIDATES) {
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 45));
             }
         }
 
@@ -1204,7 +1236,20 @@
             if (mode === 'sys_enc') {
                 return !!capturedDecodedForQ2 || capturedDecodedCandidatesForQ2.length > 0;
             }
-            if (mode === 'app_enc' || mode === 'double_enc') {
+            if (mode === 'double_enc') {
+                if (capturedRawCandidatesForQ2.length === 0 && !capturedRawForQ2) return false;
+                if (pendingHeldQ2Mode === mode) {
+                    const elapsed = Date.now() - pendingHeldQ2StartedAt;
+                    if (capturedRawCandidatesForQ2.length < DOUBLE_ENC_MIN_RAW_CANDIDATES && elapsed < HELD_Q2_MAX_WAIT_MS && pendingHeldQ2Attempts < HELD_Q2_MAX_ATTEMPTS) {
+                        return false;
+                    }
+                    if (elapsed < DOUBLE_ENC_MIN_HOLD_MS && pendingHeldQ2Attempts < HELD_Q2_MAX_ATTEMPTS) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            if (mode === 'app_enc') {
                 return capturedRawCandidatesForQ2.length > 0 || !!capturedRawForQ2;
             }
             return false;
@@ -1220,6 +1265,8 @@
         }
 
         function shouldWaitForHeldQ2(mode) {
+            // ユーザ暗号化はパスワード入力中に裏でRAW候補を集めるため、画面遷移を待たせない。
+            if (mode === 'app_enc') return false;
             if (!isEncryptedHoldMode(mode) || hasHeldQ2DataForMode(mode)) return false;
             const elapsed = Date.now() - pendingHeldQ2StartedAt;
             return elapsed < HELD_Q2_MAX_WAIT_MS && pendingHeldQ2Attempts < HELD_Q2_MAX_ATTEMPTS;
@@ -1252,10 +1299,7 @@
             return secondQR.text !== undefined && secondQR.text !== null;
         }
 
-        function tryDecodeHeldQ2WithAppMask(maskBytes) {
-            const maskArray = Array.from(maskBytes || []);
-
-            refreshRawQ2FromHeldFrames(true);
+        function tryDecodeRawCandidatesWithMask(maskArray) {
             const rawCandidates = capturedRawCandidatesForQ2.length > 0
                 ? capturedRawCandidatesForQ2
                 : (capturedRawForQ2 ? [capturedRawForQ2] : []);
@@ -1283,8 +1327,32 @@
                     }
                 }
             }
+            return false;
+        }
 
-            const decodedFromFrame = decodeHeldFrameForQ2({ appEncMask: maskArray }, true);
+        function tryDecodeHeldQ2WithAppMask(maskBytes, options = {}) {
+            const maskArray = Array.from(maskBytes || []);
+            const exhaustive = options.exhaustive !== undefined
+                ? !!options.exhaustive
+                : detectedMode !== 'app_enc';
+
+            if (tryDecodeRawCandidatesWithMask(maskArray)) {
+                return true;
+            }
+
+            const decodedQuick = decodeHeldFrameForQ2({ appEncMask: maskArray }, false);
+            if (adoptSecondQrFromDecoded(decodedQuick)) {
+                return true;
+            }
+
+            if (exhaustive) {
+                refreshRawQ2FromHeldFrames(true, detectedMode);
+                if (tryDecodeRawCandidatesWithMask(maskArray)) {
+                    return true;
+                }
+            }
+
+            const decodedFromFrame = decodeHeldFrameForQ2({ appEncMask: maskArray }, exhaustive);
             return adoptSecondQrFromDecoded(decodedFromFrame);
         }
 
@@ -1320,6 +1388,9 @@
             }
 
             document.getElementById('passwordScreen').style.display = 'none';
+            if (detectedMode === 'app_enc') {
+                isScanning = false;
+            }
             statusText.innerText = "マスク生成中...";
 
             const creationDateTimeSource = detectedMode === 'new_color_enc'
@@ -1356,12 +1427,38 @@
             }
 
             statusText.innerText = "保持済み第2QRを復号中...";
-            if (tryDecodeHeldQ2WithAppMask(appMask)) {
+            if (tryDecodeHeldQ2WithAppMask(appMask, { exhaustive: detectedMode !== 'app_enc' })) {
                 clearHeldQ2Data(true);
                 isScanning = false;
                 isProcessing = false;
                 showResultScreen();
                 return;
+            }
+
+            if (detectedMode === 'app_enc') {
+                statusText.innerText = "第2QRデータを安定化中...";
+                await collectHeldQ2FramesForMode('app_enc', APP_ENC_LAST_CHANCE_MS);
+                statusText.innerText = "保持済み第2QRを再復号中...";
+                if (tryDecodeHeldQ2WithAppMask(appMask, { exhaustive: true })) {
+                    clearHeldQ2Data(true);
+                    isScanning = false;
+                    isProcessing = false;
+                    showResultScreen();
+                    return;
+                }
+            }
+
+            if (firstQR && firstQR.creationDateTimeExt32 != null) {
+                statusText.innerText = "保持済み第2QRを別マスクで再復号中...";
+                const fallbackMask = await deriveEncryptionMaskBytesAsync(pw, 5000);
+                if (tryDecodeHeldQ2WithAppMask(fallbackMask, { exhaustive: true })) {
+                    appMask = fallbackMask;
+                    clearHeldQ2Data(true);
+                    isScanning = false;
+                    isProcessing = false;
+                    showResultScreen();
+                    return;
+                }
             }
 
             finishHeldQ2DecodeFailure();
@@ -3825,9 +3922,17 @@
                         isProcessing = false;
                         if (isScanning) requestAnimationFrame(scanLoop);
                         return;
-                    }
+            }
 
-                    let detectedItems = [];
+            if (scanStage === 2 && detectedMode === 'app_enc' && document.getElementById('passwordScreen').style.display === 'flex') {
+                prepareHeldQ2DataForMode('app_enc', currentTickFrame, [], false);
+                statusText.innerText = `第1QR読取済み / 第2QRデータ保持中... (${capturedRawCandidatesForQ2.length})`;
+                isProcessing = false;
+                if (isScanning) requestAnimationFrame(scanLoop);
+                return;
+            }
+
+            let detectedItems = [];
 
                     // === モード共通フラグ ===
                     const needSysEncForStage1 = (detectedMode === 'double_enc' && scanStage === 1);
