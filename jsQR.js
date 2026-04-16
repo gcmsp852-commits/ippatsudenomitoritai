@@ -1005,13 +1005,21 @@ function resumeDecode(rawData, appMask) {
             }
         }
         // 2. ブロック分割＋インタリーブ解除
-        var dataBlocks = getDataBlocks(decryptedCodewords, version, formatInfo.errorCorrectionLevel);
+        var ecLevel = formatInfo.errorCorrectionLevel;
+        var ecInfo = version.errorCorrectionLevels[ecLevel];
+        var totalCodewords = 0;
+        ecInfo.ecBlocks.forEach(function (block) {
+            totalCodewords += block.numBlocks * (block.dataCodewordsPerBlock + ecInfo.ecCodewordsPerBlock);
+        });
+        decryptedCodewords = decryptedCodewords.slice(0, totalCodewords);
+        var dataBlocks = getDataBlocks(decryptedCodewords, version, ecLevel);
         if (!dataBlocks) {
             return null;
         }
         var totalBytes = dataBlocks.reduce(function (a, b) { return a + b.numDataCodewords; }, 0);
         var resultBytes = new Uint8ClampedArray(totalBytes);
         var resultIndex = 0;
+        var correctedBlocksArr = [];
         // 3. 誤り訂正（ここで初めてRSを実行）
         for (var _i = 0, dataBlocks_4 = dataBlocks; _i < dataBlocks_4.length; _i++) {
             var dataBlock = dataBlocks_4[_i];
@@ -1019,12 +1027,41 @@ function resumeDecode(rawData, appMask) {
             if (!correctedBytes) {
                 return null;
             } // 復号失敗（パスワード間違いなどでエラー訂正不可）
+            correctedBlocksArr.push(correctedBytes);
             for (var i = 0; i < dataBlock.numDataCodewords; i++) {
                 resultBytes[resultIndex++] = correctedBytes[i];
             }
         }
+        var shortBlockDataSize = ecInfo.ecBlocks[0].dataCodewordsPerBlock;
+        var smallBlockCount = ecInfo.ecBlocks[0].numBlocks;
+        var hasLongBlocks = ecInfo.ecBlocks.length > 1;
+        var numBlocks = correctedBlocksArr.length;
+        var correctedCodewords = new Array(totalCodewords);
+        var wi = 0;
+        var blockPos = [];
+        for (var bp = 0; bp < numBlocks; bp++) {
+            blockPos[bp] = 0;
+        }
+        for (var i = 0; i < shortBlockDataSize; i++) {
+            for (var b = 0; b < numBlocks; b++) {
+                correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
+            }
+        }
+        if (hasLongBlocks) {
+            for (var b = smallBlockCount; b < numBlocks; b++) {
+                correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
+            }
+        }
+        while (wi < totalCodewords) {
+            for (var b = 0; b < numBlocks; b++) {
+                correctedCodewords[wi++] = correctedBlocksArr[b][blockPos[b]++];
+            }
+        }
         // 4. 文字列へのデコード（Decode payload）
-        return decodeData_1.decode(resultBytes, version.versionNumber);
+        var res = decodeData_1.decode(resultBytes, version.versionNumber);
+        res.codewords = correctedCodewords;
+        res.dataBytes = Array.from(resultBytes);
+        return res;
     }
     catch (e) {
         return null;
