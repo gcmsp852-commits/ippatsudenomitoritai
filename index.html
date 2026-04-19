@@ -562,15 +562,17 @@
         function getReadCountKey(qr) {
             const limit = getReadLimitFromQr(qr);
             if (!limit) return '';
-            if (!qr || qr.qrTwinUniqueId8 === undefined || qr.qrTwinUniqueId8 === null) return '';
             const managementCode32 = getManagementCode32FromQr(qr) || 0;
             const fingerprintSource = Array.isArray(qr.codewords)
                 ? qr.codewords.join(',')
                 : String(qr.text || qr.data || '');
             const dataHash = hashReaderId32(fingerprintSource);
+            const uniquePart = (qr && qr.qrTwinUniqueId8 !== undefined && qr.qrTwinUniqueId8 !== null)
+                ? String(qr.qrTwinUniqueId8 & 0xFF)
+                : 'noid';
             return [
                 'v1',
-                qr.qrTwinUniqueId8 & 0xFF,
+                uniquePart,
                 managementCode32 >>> 0,
                 dataHash >>> 0
             ].join(':');
@@ -580,9 +582,7 @@
             const limit = getReadLimitFromQr(qr);
             if (!limit) return { ok: true, limit: 0, count: 0, key: '' };
             const key = getReadCountKey(qr);
-            if (!key) {
-                return { ok: false, limit, count: 0, key: '', message: '読取回数管理情報が取得できません' };
-            }
+            if (!key) return { ok: true, limit: 0, count: 0, key: '' };
             const store = loadReadCountStore();
             const entry = store[key] || {};
             const count = Math.max(0, parseInt(entry.count, 10) || 0);
@@ -602,7 +602,7 @@
             store[check.key] = {
                 count: nextCount,
                 limit: check.limit,
-                qrTwinUniqueId8: qr.qrTwinUniqueId8 & 0xFF,
+                qrTwinUniqueId8: (qr.qrTwinUniqueId8 !== undefined && qr.qrTwinUniqueId8 !== null) ? (qr.qrTwinUniqueId8 & 0xFF) : null,
                 lastReadAt: new Date().toISOString()
             };
             saveReadCountStore(store);
