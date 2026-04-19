@@ -392,6 +392,8 @@ function scan(matrix, options) {
                     managementExt32: decoded.managementExt32,
                     expiryExt32: decoded.expiryExt32,
                     readerIdExt32: decoded.readerIdExt32,
+                    readLimitBits: decoded.readLimitBits,
+                    qrTwinUniqueId8: decoded.qrTwinUniqueId8,
                     locationLatExt24: decoded.locationLatExt24,
                     locationLonExt24: decoded.locationLonExt24,
                     municipalityExt24: decoded.municipalityExt24,
@@ -1188,6 +1190,7 @@ function decode(data, version) {
                 result.managementCode = managementHigh16;
                 result.managementCode32 = (((managementHigh16 & 0xFFFF) << 16) | (managementLow16 & 0xFFFF)) >>> 0;
                 result.managementFlags16 = managementLow16 & 0xFFFF;
+                result.readLimitBits = (result.managementFlags16 >>> 2) & 0x3;
                 var extBlockCount = 0;
                 if ((result.managementFlags16 & 0x0200) !== 0) extBlockCount++;
                 if ((result.managementFlags16 & 0x0100) !== 0) extBlockCount++;
@@ -1195,8 +1198,10 @@ function decode(data, version) {
                 if ((result.managementFlags16 & 0x0040) !== 0) extBlockCount++;
                 var hasLocation = (result.managementFlags16 & 0x0020) !== 0;
                 var hasMunicipality = (result.managementFlags16 & 0x0010) !== 0;
-                var extBitsNeeded = extBlockCount * 32 + (hasLocation ? 48 : 0) + (hasMunicipality ? 24 : 0) + 4;
-                if ((extBlockCount > 0 || hasLocation || hasMunicipality) && stream.available() >= extBitsNeeded) {
+                var qrNo = (managementHigh16 >>> 14) & 0x3;
+                var hasReadLimit = result.readLimitBits !== 0 && qrNo === 0;
+                var extBitsNeeded = extBlockCount * 32 + (hasLocation ? 48 : 0) + (hasMunicipality ? 24 : 0) + (hasReadLimit ? 8 : 0) + 4;
+                if ((extBlockCount > 0 || hasLocation || hasMunicipality || hasReadLimit) && stream.available() >= extBitsNeeded) {
                     if ((result.managementFlags16 & 0x0200) !== 0) {
                         result.creationDateTimeExt32 = stream.readBits(32);
                     }
@@ -1215,6 +1220,9 @@ function decode(data, version) {
                     }
                     if (hasMunicipality) {
                         result.municipalityExt24 = stream.readBits(24);
+                    }
+                    if (hasReadLimit) {
+                        result.qrTwinUniqueId8 = stream.readBits(8);
                     }
                     // 後ろの終端4ビット(0000)を読み飛ばす
                     stream.readBits(4);

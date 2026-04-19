@@ -535,6 +535,87 @@
             return currentTerminalHashes.some(hash => (hash >>> 0) === (readerIdExt32 >>> 0));
         }
 
+        const READ_COUNT_STORE_KEY = 'qrtwin_read_counts_v1';
+        let currentReadCountRecordedKey = null;
+
+        function loadReadCountStore() {
+            try {
+                return JSON.parse(localStorage.getItem(READ_COUNT_STORE_KEY) || '{}') || {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function saveReadCountStore(store) {
+            localStorage.setItem(READ_COUNT_STORE_KEY, JSON.stringify(store || {}));
+        }
+
+        function getReadLimitFromQr(qr) {
+            if (!qr) return 0;
+            if (qr.readLimitBits !== undefined && qr.readLimitBits !== null) return qr.readLimitBits & 0x3;
+            const managementCode32 = getManagementCode32FromQr(qr);
+            if (managementCode32 === null) return 0;
+            const info = parseStandardMgmt(managementCode32);
+            return info ? (info.readLimitBits & 0x3) : 0;
+        }
+
+        function getReadCountKey(qr) {
+            const limit = getReadLimitFromQr(qr);
+            if (!limit) return '';
+            if (!qr || qr.qrTwinUniqueId8 === undefined || qr.qrTwinUniqueId8 === null) return '';
+            const managementCode32 = getManagementCode32FromQr(qr) || 0;
+            const fingerprintSource = Array.isArray(qr.codewords)
+                ? qr.codewords.join(',')
+                : String(qr.text || qr.data || '');
+            const dataHash = hashReaderId32(fingerprintSource);
+            return [
+                'v1',
+                qr.qrTwinUniqueId8 & 0xFF,
+                managementCode32 >>> 0,
+                dataHash >>> 0
+            ].join(':');
+        }
+
+        function checkReadCountLimit(qr) {
+            const limit = getReadLimitFromQr(qr);
+            if (!limit) return { ok: true, limit: 0, count: 0, key: '' };
+            const key = getReadCountKey(qr);
+            if (!key) {
+                return { ok: false, limit, count: 0, key: '', message: '読取回数管理情報が取得できません' };
+            }
+            const store = loadReadCountStore();
+            const entry = store[key] || {};
+            const count = Math.max(0, parseInt(entry.count, 10) || 0);
+            if (count >= limit) {
+                return { ok: false, limit, count, key, message: '読取回数がリミットに達しました' };
+            }
+            return { ok: true, limit, count, key };
+        }
+
+        function recordReadCountIfNeeded(qr) {
+            const check = checkReadCountLimit(qr);
+            if (!check.ok || !check.limit || !check.key) return;
+            if (currentReadCountRecordedKey === check.key) return;
+            const store = loadReadCountStore();
+            const entry = store[check.key] || {};
+            const nextCount = (Math.max(0, parseInt(entry.count, 10) || 0) + 1);
+            store[check.key] = {
+                count: nextCount,
+                limit: check.limit,
+                qrTwinUniqueId8: qr.qrTwinUniqueId8 & 0xFF,
+                lastReadAt: new Date().toISOString()
+            };
+            saveReadCountStore(store);
+            currentReadCountRecordedKey = check.key;
+        }
+
+        function ensureReadCountAllowed(qr) {
+            const check = checkReadCountLimit(qr);
+            if (check.ok) return true;
+            showResultScreen(null, check.message || '読取回数がリミットに達しました');
+            return false;
+        }
+
         // 端末情報登録処理
         function doLogin() {
             const profile = getTerminalProfile();
@@ -1175,6 +1256,7 @@
                 if (label1El) label1El.innerText = '第1QR';
                 if (label2El) label2El.innerText = '第2QR';
             } else if (digitalSignResult) {
+                recordReadCountIfNeeded(firstQR);
                 // 電子署名モード結果表示
                 resultTitle.style.color = '';
                 normalSection.style.display = 'none';
@@ -1209,6 +1291,7 @@
                     imgContainer.style.display = 'none';
                 }
             } else {
+                recordReadCountIfNeeded(firstQR);
                 // 通常モード / 二重暗号化モード結果表示
                 resultTitle.style.color = '';
                 normalSection.style.display = '';
@@ -1251,6 +1334,7 @@
             sysEncStage3 = false;
             digitalSignStage3 = false;
             lastTwinBBox = null;
+            currentReadCountRecordedKey = null;
             resetNewColorScanState();
             
             // モード選択画面に戻す
@@ -1277,6 +1361,7 @@
             sysEncStage3 = false;
             digitalSignStage3 = false;
             lastTwinBBox = null;
+            currentReadCountRecordedKey = null;
             resetNewColorScanState();
             // ★ 防御的リセット：前回スキャン中の状態が残る場合に備える
             isProcessing = false;
@@ -1332,7 +1417,7 @@
         }
 
         function resetColorScanResult() {
-            colorScanResult = { qr1: null, qr2: null, qr3: null, qr4: null, _loc: null, _crop: null };
+            colorScanResult = { qr1: null, qr2: null, qr3: null, qr4: null, _loc: null, _crop: null, _q1Meta: null };
             colorScanBBox = null;
             colorScanAttemptCount = 0;
         }
@@ -2153,6 +2238,13 @@
                     // 同期チェックはできないので、フラグだけ立てて後で非同期チェック
                     target._pendingMunicipalityCheck = qr.municipalityExt24;
                 }
+                const readCountCheck = checkReadCountLimit(qr);
+                if (!readCountCheck.ok) {
+                    target._readCountFailed = true;
+                    target._readCountMessage = readCountCheck.message || '読取回数がリミットに達しました';
+                    return;
+                }
+                target._q1Meta = qr;
                 target._expiryChecked = true;
             }
             if (zeroMatch) {
@@ -2356,6 +2448,7 @@
         }
 
         function showColorResult(data) {
+            recordReadCountIfNeeded(data && data._q1Meta);
             renderResultText('colorRes1', data.qr1 || null, '(not found)');
             renderResultText('colorRes2', data.qr2 || null, '(not found)');
             renderResultText('colorRes3', data.qr3 || null, '(not found)');
@@ -3175,7 +3268,8 @@
                 hasReaderId: (low & 0x0080) !== 0,
                 hasImageId: (low & 0x0040) !== 0,
                 hasLocation: (low & 0x0020) !== 0,
-                hasMunicipality: (low & 0x0010) !== 0
+                hasMunicipality: (low & 0x0010) !== 0,
+                readLimitBits: (low >>> 2) & 0x3
             };
         }
 
@@ -3252,6 +3346,7 @@
 
         // ★ 新カラー符号化モード結果画面表示
         function showNewColorResult(q1Text, q2Text, q3Text, q4Text, mgmtInfo, q1Meta = null) {
+            recordReadCountIfNeeded(q1Meta);
             if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
             isScanning = false;
 
@@ -3483,14 +3578,22 @@
                                             return;
                                         }
                                     }
+                                    if (!ensureReadCountAllowed(q1Found)) {
+                                        isScanning = false; isProcessing = false;
+                                        return;
+                                    }
 
                                     newColorQ1Data = {
                                         text: q1Found.data,
+                                        data: q1Found.data,
                                         managementCode: q1Found.managementCode,
+                                        managementCode32: q1Found.managementCode32,
                                         managementFlags16: q1Found.managementFlags16,
                                         managementExt32: q1Found.managementExt32,
                                         mgmtInfo: mgmtInfo,
                                         creationDateTimeExt32: q1Found.creationDateTimeExt32,
+                                        readLimitBits: q1Found.readLimitBits,
+                                        qrTwinUniqueId8: q1Found.qrTwinUniqueId8,
                                         codewords: q1Found.codewords,
                                         dataBytes: q1Found.dataBytes,
                                         location: q1Found.location,
@@ -3617,6 +3720,11 @@
                             showResultScreen(null, "市町村コードが一致しません");
                             return;
                         }
+                        if (colorScanResult._readCountFailed) {
+                            isScanning = false; isProcessing = false;
+                            showResultScreen(null, colorScanResult._readCountMessage || "読取回数がリミットに達しました");
+                            return;
+                        }
                         if (colorCount === 4) {
                             isScanning = false;
                             isProcessing = false;
@@ -3680,6 +3788,8 @@
                                                     managementExt32: res.managementExt32,
                                                     expiryExt32: res.expiryExt32,
                                                     readerIdExt32: res.readerIdExt32,
+                                                    readLimitBits: res.readLimitBits,
+                                                    qrTwinUniqueId8: res.qrTwinUniqueId8,
                                                     locationLatExt24: res.locationLatExt24,
                                                     locationLonExt24: res.locationLonExt24,
                                                     municipalityExt24: res.municipalityExt24,
@@ -3739,6 +3849,8 @@
                                                     managementExt32: cropRes.managementExt32,
                                                     expiryExt32: cropRes.expiryExt32,
                                                     readerIdExt32: cropRes.readerIdExt32,
+                                                    readLimitBits: cropRes.readLimitBits,
+                                                    qrTwinUniqueId8: cropRes.qrTwinUniqueId8,
                                                     locationLatExt24: cropRes.locationLatExt24,
                                                     locationLonExt24: cropRes.locationLonExt24,
                                                     municipalityExt24: cropRes.municipalityExt24,
@@ -3798,6 +3910,8 @@
                                             managementExt32: cropRes.managementExt32,
                                             expiryExt32: cropRes.expiryExt32,
                                             readerIdExt32: cropRes.readerIdExt32,
+                                            readLimitBits: cropRes.readLimitBits,
+                                            qrTwinUniqueId8: cropRes.qrTwinUniqueId8,
                                             locationLatExt24: cropRes.locationLatExt24,
                                             locationLonExt24: cropRes.locationLonExt24,
                                             municipalityExt24: cropRes.municipalityExt24,
@@ -3857,6 +3971,8 @@
                                         managementExt32: resFull.managementExt32,
                                         expiryExt32: resFull.expiryExt32,
                                         readerIdExt32: resFull.readerIdExt32,
+                                        readLimitBits: resFull.readLimitBits,
+                                        qrTwinUniqueId8: resFull.qrTwinUniqueId8,
                                         locationLatExt24: resFull.locationLatExt24,
                                         locationLonExt24: resFull.locationLonExt24,
                                         municipalityExt24: resFull.municipalityExt24,
@@ -3905,9 +4021,13 @@
                                     firstQR = {
                                         text: resultData,
                                         managementCode: resultMgmt,
+                                        managementCode32: item.managementCode32,
+                                        managementFlags16: item.managementFlags16,
                                         managementExt32: item.managementExt32,
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
+                                        readLimitBits: item.readLimitBits,
+                                        qrTwinUniqueId8: item.qrTwinUniqueId8,
                                         creationDateTimeExt32: item.creationDateTimeExt32,
                                         locationLatExt24: item.locationLatExt24,
                                         locationLonExt24: item.locationLonExt24,
@@ -3948,6 +4068,10 @@
                                             return;
                                         }
                                     }
+                                    if (!ensureReadCountAllowed(firstQR)) {
+                                        isScanning = false; isProcessing = false;
+                                        return;
+                                    }
                                     statusText.innerText = "第2QR（電子署名データ）を探索中...";
                                     enterDigitalSignPairScan(1);
                                 } else if (qrNo === 1) {
@@ -3966,9 +4090,13 @@
                             firstQR = {
                                 text: resultData,
                                 managementCode: resultMgmt,
+                                managementCode32: item.managementCode32,
+                                managementFlags16: item.managementFlags16,
                                 managementExt32: item.managementExt32,
                                 expiryExt32: item.expiryExt32,
                                 readerIdExt32: item.readerIdExt32,
+                                readLimitBits: item.readLimitBits,
+                                qrTwinUniqueId8: item.qrTwinUniqueId8,
                                 creationDateTimeExt32: item.creationDateTimeExt32,
                                 locationLatExt24: item.locationLatExt24,
                                 locationLonExt24: item.locationLonExt24,
@@ -4010,6 +4138,10 @@
                                     return;
                                 }
                             }
+                            if (!ensureReadCountAllowed(firstQR)) {
+                                isScanning = false; isProcessing = false;
+                                return;
+                            }
 
                             // 同一データフラグ
                             if (mgmtInfo && mgmtInfo.sameDataFlag) {
@@ -4050,9 +4182,13 @@
                                     firstQR = {
                                         text: resultData,
                                         managementCode: resultMgmt,
+                                        managementCode32: item.managementCode32,
+                                        managementFlags16: item.managementFlags16,
                                         managementExt32: item.managementExt32,
                                         expiryExt32: item.expiryExt32,
                                         readerIdExt32: item.readerIdExt32,
+                                        readLimitBits: item.readLimitBits,
+                                        qrTwinUniqueId8: item.qrTwinUniqueId8,
                                         creationDateTimeExt32: item.creationDateTimeExt32,
                                         locationLatExt24: item.locationLatExt24,
                                         locationLonExt24: item.locationLonExt24,
@@ -4092,6 +4228,10 @@
                                             showResultScreen(null, "市町村コードが一致しません");
                                             return;
                                         }
+                                    }
+                                    if (!ensureReadCountAllowed(firstQR)) {
+                                        isScanning = false; isProcessing = false;
+                                        return;
                                     }
                                 } else {
                                     continue; // それ以外の重複読取は無視
